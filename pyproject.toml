@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gfem"
+version = "0.2.0"
+description = "GPU-accelerated nonlinear finite element analysis with CAD import and a browser GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = ["jax>=0.4.30", "numpy", "scipy"]
+
+[project.optional-dependencies]
+cad = ["gmsh>=4.11", "ezdxf"]
+amg = ["pyamg"]
+all = ["gmsh>=4.11", "ezdxf", "pyamg", "meshio"]
+cuda = ["jax[cuda12]"]
+test = ["pytest"]
+
+[project.scripts]
+gfem = "gfem.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["gfem*"]
+
+[tool.setuptools.package-data]
+"gfem.gui" = ["static/*", "static/js/*", "static/vendor/*", "static/css/*"]
+"gfem" = ["data/*"]

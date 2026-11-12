@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+gfem_work/
+out*/
+*.vtu
+*.pvd
+.pytest_cache/
