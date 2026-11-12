@@ -12,7 +12,8 @@ import numpy as np
 import jax.numpy as jnp
 
 from .model import Model
-from .elements import ELEMENTS
+from .elements import ELEMENTS, FACETS
+from .structural import STRUCT_ELEMENTS, beam_section
 from .materials import from_props
 from .surfaces import element_face_surface, Surface
 from . import solvers as S
@@ -33,11 +34,13 @@ def build(spec, log=print):
     ne = spec.nelem
     types, conns = spec.element_table()
     emat = np.full(ne, None, dtype=object)
-    for sec in spec.sections:
+    esec = np.full(ne, -1)
+    for si, sec in enumerate(spec.sections):
         es = spec.elsets.get(sec["elset"])
         if es is None:
             raise BuildError(f"section refers to unknown elset {sec['elset']}")
         emat[es] = sec["material"]
+        esec[es] = si
     if any(x is None for x in emat):
         if len(spec.materials) == 1:
             emat[[i for i in range(ne) if emat[i] is None]] = next(iter(spec.materials))
@@ -56,14 +59,29 @@ def build(spec, log=print):
     for i, (t, mname) in enumerate(zip(types, emat)):
         if mname is None:
             continue
+        if t in STRUCT_ELEMENTS:
+            keyed.setdefault((STRUCT_ELEMENTS[t].name, mname, t, int(esec[i])), []).append(i)
+            continue
         if t not in ELEMENTS:
             raise BuildError(f"element type {t} not supported")
-        keyed.setdefault((ELEMENTS[t].name, mname, t), []).append(i)
+        keyed.setdefault((ELEMENTS[t].name, mname, t, -1), []).append(i)
     elem_block = np.full(ne, -1)
     elem_local = np.full(ne, -1)
-    for (ename, mname, t), idx in keyed.items():
+    for (ename, mname, t, si), idx in keyed.items():
         conn = np.array([conns[i] for i in idx])
-        b = model.add_block(conn, ELEMENTS[t], mats[mname], name=f"{mname}:{t}")
+        sec = spec.sections[si] if si >= 0 else {}
+        if t in STRUCT_ELEMENTS and STRUCT_ELEMENTS[t].kind == "shell":
+            if "thickness" not in sec:
+                raise BuildError(f"shell elements in {sec.get('elset')} need a shell section thickness")
+            b = model.add_shell(conn, mats[mname], float(sec["thickness"]), name=f"{mname}:{t}",
+                                etype=STRUCT_ELEMENTS[t])
+        elif t in STRUCT_ELEMENTS:
+            prof = sec.get("profile", "RECT")
+            dims = sec.get("dims", [1.0, 1.0])
+            b = model.add_beam(conn, mats[mname], beam_section(prof, dims), n1=sec.get("n1"),
+                               name=f"{mname}:{t}")
+        else:
+            b = model.add_block(conn, ELEMENTS[t], mats[mname], name=f"{mname}:{t}")
         elem_block[idx] = len(model.blocks) - 1
         elem_local[idx] = np.arange(len(idx))
     eid_all = np.concatenate([g.ids for g in spec.groups]) if spec.groups else np.zeros(0)
@@ -77,9 +95,18 @@ def build(spec, log=print):
     for name, sd in spec.surfaces.items():
         if "elems" in sd:
             el = np.asarray(sd["elems"], dtype=np.int64)
+            fc = np.asarray(sd["faces"])
             ok = elem_block[el] >= 0
-            tri = np.stack([elem_block[el[ok]], elem_local[el[ok]], np.asarray(sd["faces"])[ok]], 1)
-            model.add_surface(name, element_face_surface(X, model.blocks, tri, name))
+            shell = np.array([hasattr(model.blocks[b], "directors") for b in elem_block[el]], bool) & ok
+            solid = ok & ~shell
+            tri = np.stack([elem_block[el[solid]], elem_local[el[solid]], fc[solid]], 1)
+            surf = element_face_surface(X, model.blocks, tri, name)
+            for e, f in zip(el[shell], fc[shell]):     # shell faces: 0 = SPOS, 1 = SNEG
+                b = model.blocks[elem_block[e]]
+                row = np.asarray(b.vis_conn)[elem_local[e]]
+                row = row if f == 0 else row[::-1]
+                surf.add(FACETS[len(row)], row[None])
+            model.add_surface(name, surf)
         else:
             s = Surface(name=name)
             s.node_only = np.asarray(sd["nodes"], dtype=np.int64)
@@ -195,7 +222,7 @@ def _nodal_average(model, elem_vals, vols):
     acc = np.zeros((nn, k))
     w = np.zeros(nn)
     for b, v, vol in zip(model.blocks, elem_vals, vols):
-        conn = np.asarray(b.conn)
+        conn = np.asarray(getattr(b, "vis_conn", b.conn))
         v = np.asarray(v).reshape(len(conn), k)
         np.add.at(acc, conn, (v * vol[:, None])[:, None, :])
         np.add.at(w, conn, np.broadcast_to(vol[:, None], conn.shape))
@@ -211,8 +238,15 @@ def postprocess(model, u, states, fields=None, density=None, T=None, vols=None, 
     nn = model.nn
     if vols is None:
         vols = [np.asarray(v) for v in model.volumes()]
+    nr = getattr(model, "n_real", model.nn)
     if u is not None:
-        out["U"] = np.asarray(u).reshape(-1, 3)
+        Ufull = np.asarray(u).reshape(-1, 3)
+        out["U"] = Ufull
+        if model.rot_of:
+            UR = np.zeros((model.nn, 3))
+            idx = np.array(list(model.rot_of.keys()))
+            UR[idx] = Ufull[np.array(list(model.rot_of.values()))]
+            out["UR"] = UR
         st = model.stresses(u, states, fields)
         Se = [_voigt(np.asarray(x["S"])) for x in st]
         mises = [np.asarray(x["MISES"])[:, None] for x in st]
@@ -237,13 +271,18 @@ def postprocess(model, u, states, fields=None, density=None, T=None, vols=None, 
         out["T"] = np.asarray(fields["T"])
     if T is not None:
         out["T"] = np.asarray(T)
+    if nr < model.nn:                              # drop rotation rows / remote points
+        for k in list(out):
+            v = out[k]
+            if isinstance(v, np.ndarray) and v.ndim >= 1 and len(v) == model.nn:
+                out[k] = v[:nr]
     if density is not None:
         out["density"] = np.asarray(density)
         dens_blocks, o = [], 0
         for b in model.blocks:
             dens_blocks.append(np.asarray(density[o:o + b.ne])[:, None])
             o += b.ne
-        out["density_nodal"] = _nodal_average(model, dens_blocks, vols)[:, 0]
+        out["density_nodal"] = _nodal_average(model, dens_blocks, vols)[:nr, 0]
     return out
 
 

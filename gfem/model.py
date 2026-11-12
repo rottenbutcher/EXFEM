@@ -183,6 +183,65 @@ class Model:
         self.elem_ids = None      # per block arrays of external element numbers
         self.units = None
         self.T0 = None            # initial (stress-free) nodal temperature
+        self.n_real = self.nn     # rows >= n_real are rotation nodes (shells, beams, remote points)
+        self.rot_of = {}          # real node -> rotation row
+
+    def add_rotation_nodes(self, nodes):
+        """Create (or return existing) rotation rows for real nodes; returns their row indices."""
+        nodes = [int(n) for n in np.asarray(nodes).ravel()]
+        new = [n for n in dict.fromkeys(nodes) if n not in self.rot_of]
+        if new:
+            X = np.asarray(self.X)
+            for k, n in enumerate(new):
+                self.rot_of[n] = len(X) + k
+            self.X = jnp.asarray(np.vstack([X, X[new]]))
+            self.nn = int(self.X.shape[0])
+            self.ndof = 3 * self.nn
+        return np.array([self.rot_of[n] for n in nodes], dtype=np.int64)
+
+    def add_point(self, xyz, rotations=True):
+        """Add a free reference node (remote point); returns (node, rotation row)."""
+        X = np.asarray(self.X)
+        n = len(X)
+        self.X = jnp.asarray(np.vstack([X, np.asarray(xyz, float)[None]]))
+        self.nn += 1
+        self.ndof = 3 * self.nn
+        self.extra_points = getattr(self, "extra_points", []) + [n]
+        r = self.add_rotation_nodes([n])[0] if rotations else None
+        return n, r
+
+    def dof(self, nodes, d):
+        """Global dof indices of component d (0-2 translations, 3-5 rotations) of nodes."""
+        nodes = np.asarray(nodes, dtype=np.int64).ravel()
+        if d < 3:
+            return nodes * 3 + d
+        rows = np.array([self.rot_of.get(int(n), -1) for n in nodes], dtype=np.int64)
+        rows = rows[rows >= 0]
+        return rows * 3 + (d - 3)
+
+    def rot_mask(self):
+        m = np.zeros(self.nn, bool)
+        m[list(self.rot_of.values())] = True
+        return m
+
+    def add_shell(self, conn, material, thickness, name=None, etype=None):
+        from .structural import ShellBlock, S4, S3
+        conn = np.asarray(conn, dtype=np.int64)
+        r = self.add_rotation_nodes(conn.ravel()).reshape(conn.shape)
+        et = etype or (S4 if conn.shape[1] == 4 else S3)
+        b = ShellBlock(conn, r, np.asarray(self.X), et, material, thickness, name or f"shell{len(self.blocks)}")
+        self.blocks.append(b)
+        return b
+
+    def add_beam(self, conn, material, section, n1=None, name=None):
+        from .structural import BeamBlock, B31, beam_section
+        conn = np.asarray(conn, dtype=np.int64)
+        r = self.add_rotation_nodes(conn.ravel()).reshape(conn.shape)
+        if isinstance(section, (tuple, list)):
+            section = beam_section(*section)
+        b = BeamBlock(conn, r, np.asarray(self.X), B31, material, section, name or f"beam{len(self.blocks)}", n1)
+        self.blocks.append(b)
+        return b
 
     def add_block(self, conn, etype, material, name=None):
         b = Block(conn, etype, material, name or f"block{len(self.blocks)}")
@@ -289,9 +348,19 @@ class Model:
             out.append(dict(S=sig, MISES=mises, PEEQ=ep, F=F))
         return out
 
-    def geometric_ops(self, stresses):
-        return [(b.dofs(), b.geo_stiff(self.X[b.conn], st["S"]))
-                for b, st in zip(self.blocks, stresses)]
+    def geometric_ops(self, stresses, u=None, states=None):
+        """Initial-stress stiffness. Solids: exact K_sigma from the stress; shells/beams:
+        directional derivative of the AD tangent along the pre-buckling displacement."""
+        out = []
+        T, _ = self._fields(None)
+        U = None if u is None else u.reshape(-1, 3)
+        states = states or self.init_state()
+        for b, st, s in zip(self.blocks, stresses, states):
+            if hasattr(b, "geo_dir"):
+                out.append((b.dofs(), b.geo_dir(self.X[b.conn], U[b.conn], s, T[b.conn])))
+            else:
+                out.append((b.dofs(), b.geo_stiff(self.X[b.conn], st["S"])))
+        return out
 
     # ---------- topology helpers ----------
     def skin(self, return_owner=False):

@@ -123,7 +123,7 @@ class _Setup:
 
         for bc in step.bcs:
             nodes, dof, val = bc[:3]
-            d = np.asarray(nodes, dtype=np.int64) * 3 + dof
+            d = m.dof(nodes, dof)
             self.fixed[d] = True
             self.target[d] = val
             self.bc_amp[d] = amp_id(bc[3] if len(bc) > 3 else None)
@@ -135,7 +135,7 @@ class _Setup:
             nodes, dof, val = ld[:3]
             k = amp_id(ld[3] if len(ld) > 3 else None)
             g = groups.setdefault(k, np.zeros(nd))
-            np.add.at(g, np.asarray(nodes, dtype=np.int64) * 3 + dof, val)
+            np.add.at(g, m.dof(nodes, dof), val)
         for pr in step.pressures:
             surf, p = pr[:2]
             amp = pr[2] if len(pr) > 2 else None
@@ -460,24 +460,46 @@ class StaticSolver:
         return setup.free * setup.tr.apply_T(r), fint, s_new, cps
 
     def _newton(self, u, s_old, fext, t, fields, setup, inc):
-        fn = float(jnp.linalg.norm(fext))
+        rmask = getattr(setup, "rotdof", None)
+        if rmask is None:
+            rm = np.zeros(self.m.ndof, bool)
+            rows = list(self.m.rot_of.values())
+            for k in range(3):
+                rm[np.asarray(rows, dtype=np.int64) * 3 + k] = True
+            setup.rotdof = rmask = jnp.asarray(rm)
+            setup.has_rot = bool(rm.any())
+            self.qref_r = 0.0
         hist = []
-        dun = 0.0
+        dut = dur = 0.0
+
+        def norms(v):
+            if not setup.has_rot:
+                return float(jnp.linalg.norm(v)), 0.0
+            return float(jnp.linalg.norm(jnp.where(rmask, 0.0, v))), float(jnp.linalg.norm(jnp.where(rmask, v, 0.0)))
+        fn_t, fn_r = norms(fext)
         for it in range(1, self.max_iter + 1):
             r, fint, s_new, cps = self._residual(u, s_old, fext, t, fields, setup)
-            rn = float(jnp.linalg.norm(r))
-            ref = max(fn, float(jnp.linalg.norm(fint)), 1e-3 * self.qref, 1e-30)
-            self.qref = max(self.qref, fn, float(jnp.linalg.norm(fint)))
-            hist.append(rn / ref)
-            self.mon.iteration(inc=inc, it=it, residual=rn / ref, du=dun, t=t)
-            if not np.isfinite(rn):
+            rt, rr = norms(r)
+            ft, fr = norms(fint)
+            ref = max(fn_t, ft, 1e-3 * self.qref, 1e-30)
+            self.qref = max(self.qref, fn_t, ft)
+            self.qref_r = max(getattr(self, "qref_r", 0.0), fn_r, fr)
+            if not hasattr(self, "_lc"):
+                self._lc = self.m.char_length()
+            ref_r = max(fn_r, fr, 1e-3 * self.qref_r, 1e-2 * ref * self._lc, 1e-30)
+            ratio = max(rt / ref, rr / ref_r if setup.has_rot and self.qref_r > 0 else 0.0)
+            hist.append(ratio)
+            self.mon.iteration(inc=inc, it=it, residual=ratio, du=dut, t=t)
+            if not np.isfinite(rt + rr):
                 return False, it, u, s_old, hist
-            un = max(float(jnp.linalg.norm(u)), 1e-30)
-            if rn <= self.rtol * ref * 1e-2 or (it > 1 and rn <= self.rtol * ref and dun <= 1e-2 * un):
+            ut_n, ur_n = norms(u)
+            small_du = dut <= 1e-2 * max(ut_n, 1e-30) and (not setup.has_rot or dur <= 1e-2 * max(ur_n, 1e-30))
+            if ratio <= self.rtol * 1e-2 or (it > 1 and ratio <= self.rtol and small_du):
                 return True, it - 1, u, s_new, hist
             du = self._linsolve(u, s_old, fields, cps, -r, setup)
             alpha = 1.0
             if self.line_search:
+                rn = float(jnp.linalg.norm(r))
                 for _ in range(4):
                     ut = u + alpha * du
                     ut = setup.tr.apply(ut) if setup.tr.active else ut
@@ -487,7 +509,7 @@ class StaticSolver:
                     alpha *= 0.5
             u = u + alpha * du
             u = setup.tr.apply(u) if setup.tr.active else u
-            dun = float(jnp.linalg.norm(alpha * du))
+            dut, dur = norms(alpha * du)
         return False, self.max_iter, u, s_old, hist
 
 
@@ -860,7 +882,7 @@ def buckling(model, step, state=None, monitor=None):
     u, states, _ = solver.solve(s1, state=State(model))
     stress = model.stresses(u, states)
     K0, keep, setup = _reduced(model, step, st, model.stiffness_ops(jnp.zeros(model.ndof), model.init_state()))
-    KG, _, _ = _reduced(model, step, st, model.geometric_ops(stress))
+    KG, _, _ = _reduced(model, step, st, model.geometric_ops(stress, u, states))
     nm = min(step.nmodes, K0.shape[0] - 2)
     lu = spla.splu(K0.tocsc())
     Kinv = spla.LinearOperator(K0.shape, matvec=lu.solve, dtype=float)

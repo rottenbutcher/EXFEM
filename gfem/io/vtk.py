@@ -26,14 +26,16 @@ def write_vtu(path, model, frame=None, u=None, stresses=None):
     signature write_vtu(path, model, u, stresses) is accepted."""
     if frame is not None and not isinstance(frame, dict):
         u, stresses, frame = frame, u, None
-    X = np.asarray(model.X)
+    X = np.asarray(model.X)[:getattr(model, "n_real", len(model.X))]
     conns, types = [], []
     for b in model.blocks:
-        c = np.asarray(b.conn)
+        c = np.asarray(getattr(b, "vis_conn", b.conn))
         conns.append(c)
         types += [b.etype.vtk_id] * len(c)
     offsets = np.cumsum([c.shape[1] for c in conns for _ in range(len(c))])
     flat = np.concatenate([c.ravel() for c in conns]) if conns else np.zeros(0)
+    if u is not None:
+        u = np.asarray(u).reshape(-1, 3)[:len(X)]
     pd, cd = [], []
     if frame is None:
         frame = {}

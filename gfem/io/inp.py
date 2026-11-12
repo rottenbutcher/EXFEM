@@ -18,6 +18,9 @@ Reader coverage
 import os
 import numpy as np
 from ..elements import ELEMENTS
+from ..structural import STRUCT_ELEMENTS
+
+ALL_ELEMENTS = dict(ELEMENTS, **STRUCT_ELEMENTS)
 from ..spec import Spec, new_step
 
 
@@ -74,8 +77,8 @@ class _Part:
 
 
 class InpReader:
-    SYM = {"ENCASTRE": [0, 1, 2], "PINNED": [0, 1, 2], "XSYMM": [0], "YSYMM": [1], "ZSYMM": [2],
-           "XASYMM": [1, 2], "YASYMM": [0, 2], "ZASYMM": [0, 1]}
+    SYM = {"ENCASTRE": [0, 1, 2, 3, 4, 5], "PINNED": [0, 1, 2], "XSYMM": [0, 4, 5], "YSYMM": [1, 3, 5],
+           "ZSYMM": [2, 3, 4], "XASYMM": [1, 2, 3], "YASYMM": [0, 2, 4], "ZASYMM": [0, 1, 5]}
 
     def __init__(self, path):
         self.path = path
@@ -126,10 +129,10 @@ class InpReader:
                         tgt.nsets.setdefault(p["NSET"].upper(), []).append(int(d[0]))
             elif kw == "ELEMENT":
                 et = p["TYPE"].upper()
-                if et not in ELEMENTS:
+                if et not in ALL_ELEMENTS:
                     raise ValueError(f"element type {et} not supported")
                 flat = [x for d in data for x in d if x]
-                nn = ELEMENTS[et].nnode
+                nn = ALL_ELEMENTS[et].nnode
                 for i in range(0, len(flat), nn + 1):
                     eid = int(flat[i])
                     tgt.elements.append((et, eid, [int(x) for x in flat[i + 1:i + 1 + nn]]))
@@ -159,6 +162,23 @@ class InpReader:
                 tgt.surfaces[name] = (typ, rows)
             elif kw == "SOLID SECTION":
                 tgt.sections.append((p["ELSET"].upper(), p["MATERIAL"].upper()))
+            elif kw == "SHELL SECTION":
+                th = _f(data[0][0], 1.0) if data and data[0] and data[0][0] else 1.0
+                tgt.sections.append((p["ELSET"].upper(), p["MATERIAL"].upper(), dict(kind="shell", thickness=th)))
+            elif kw in ("BEAM SECTION", "BEAM GENERAL SECTION"):
+                prof = str(p.get("SECTION", "RECT")).upper()
+                dims = [_f(x) for x in data[0] if x] if data else [1.0, 1.0]
+                n1 = [_f(x) for x in data[1][:3]] if len(data) > 1 and any(x for x in data[1]) else None
+                mat_ = p.get("MATERIAL", "").upper()
+                if kw == "BEAM GENERAL SECTION":
+                    prof = "GENERAL"
+                    A, I11, I12, I22, J = (dims + [0] * 5)[:5]
+                    dims = [A, I11, I22, J]
+                    if not mat_:
+                        E_, G_ = ([_f(x) for x in data[2]] + [0, 0])[:2] if len(data) > 2 else (1.0, 0.4)
+                        mat_ = f"_BEAMGEN_{p['ELSET'].upper()}"
+                        self.materials[mat_] = dict(E=E_, nu=E_ / (2 * G_) - 1 if G_ else 0.3)
+                tgt.sections.append((p["ELSET"].upper(), mat_, dict(kind="beam", profile=prof, dims=dims, n1=n1)))
             elif kw == "MATERIAL":
                 mat = self.materials.setdefault(p["NAME"].upper(), {})
             elif kw == "ELASTIC":
@@ -335,8 +355,8 @@ class InpReader:
                 elsets[pre + k] = (inst, v, part)
             for k, v in part.surfaces.items():
                 surfaces[pre + k] = (inst, v)
-            for es, m in part.sections:
-                sections.append((pre + es, m))
+            for sec in part.sections:
+                sections.append((pre + sec[0],) + tuple(sec[1:]))
 
         add_part("", self.root)
         for name, pname, tr, rot in self.instances:
@@ -425,15 +445,19 @@ class InpReader:
                 el, fc = [], []
                 for ref, face in rows:
                     es = resolve((f"{inst}." if inst and not ref.isdigit() else "") + ref, "E")
-                    k = int(face[1:]) - 1 if face.startswith("S") else 0
+                    k = 1 if face == "SNEG" else 0 if face in ("SPOS", "") else int(face[1:]) - 1
                     el.extend(es)
                     fc.extend([k] * len(es))
                 sp.surfaces[name] = dict(elems=np.array(el, np.int64), faces=np.array(fc, np.int64))
             if single and name.startswith(inst0 + "."):
                 sp.surfaces.setdefault(name.split(".", 1)[1], sp.surfaces[name])
-        for es, m in sections:
+        for sec in sections:
+            es, m = sec[0], sec[1]
             key = es if es in sp.elsets else (f"{inst0}.{es}" if f"{inst0}.{es}" in sp.elsets else es)
-            sp.sections.append(dict(elset=key, material=m))
+            d = dict(elset=key, material=m)
+            if len(sec) > 2:
+                d.update(sec[2])
+            sp.sections.append(d)
         for name, props in self.materials.items():
             sp.materials[name] = props
         sp.amplitudes = dict(self.amplitudes)
@@ -490,7 +514,7 @@ class InpReader:
                 a = int(_f(d[1]))
                 b = int(_f(d[2])) if len(d) > 2 and d[2] else a
                 val = _f(d[3]) if len(d) > 3 and d[3] else 0.0
-                dofs = [k - 1 for k in range(a, b + 1) if k <= 3]
+                dofs = [k - 1 for k in range(a, b + 1) if k <= 6]
                 if a <= 11 <= b:
                     for n in self._nodes(d[0]):
                         temps[n] = val
@@ -550,6 +574,11 @@ class InpReader:
                     elif kind == "CENTRIF":
                         dl.append(dict(kind="CENTRIF", elset=d[0].upper() if d[0] else None, value=_f(d[2]),
                                        point=[_f(x) for x in d[3:6]], axis=[_f(x) for x in d[6:9]], amp=a))
+                    elif kind == "P" or kind == "PNEG":
+                        el = self._elems(d[0])
+                        name = f"_DLOAD_{d[0].upper()}_{kind}"
+                        sp.surfaces[name] = dict(elems=el, faces=np.full(len(el), 0 if kind == "P" else 1))
+                        ds.append(dict(surface=name, kind="P", value=_f(d[2]), amp=a, follower=True))
                     elif kind.startswith("P") and kind[1:].isdigit():
                         # element face pressure -> anonymous surface
                         el = self._elems(d[0])
@@ -633,15 +662,35 @@ def write_inp(spec, path):
         if "elems" in s:
             L.append(f"*SURFACE, NAME={_safe(k)}, TYPE=ELEMENT")
             el, fc = np.asarray(s["elems"]), np.asarray(s["faces"])
-            for f in np.unique(fc):
-                name = f"_{_safe(k)}_S{f + 1}"
-                L.insert(len(L) - 1, f"*ELSET, ELSET={name}\n{_fmt_rows(eids[el[fc == f]])}")
-                L.append(f"{name}, S{f + 1}")
+            types_ = spec.element_table()[0]
+            shell = np.array([types_[e] in STRUCT_ELEMENTS for e in el], bool)
+            for isshell in (False, True):
+                for f in np.unique(fc[shell == isshell]):
+                    sel = (fc == f) & (shell == isshell)
+                    lab = ("SPOS" if f == 0 else "SNEG") if isshell else f"S{f + 1}"
+                    name = f"_{_safe(k)}_{lab}"
+                    L.insert(len(L) - 1, f"*ELSET, ELSET={name}\n{_fmt_rows(eids[el[sel]])}")
+                    L.append(f"{name}, {lab}")
         else:
             L.append(f"*NSET, NSET=_{_safe(k)}_N\n{_fmt_rows(nid[np.asarray(s['nodes'])])}")
             L.append(f"*SURFACE, NAME={_safe(k)}, TYPE=NODE\n_{_safe(k)}_N, 1.0")
     for sec in spec.sections:
-        L.append(f"*SOLID SECTION, ELSET={_safe(sec['elset'])}, MATERIAL={_safe(sec['material'])}\n,")
+        k = sec.get("kind", "solid")
+        if k == "shell":
+            L.append(f"*SHELL SECTION, ELSET={_safe(sec['elset'])}, MATERIAL={_safe(sec['material'])}\n{sec['thickness']:.10g}, 5")
+        elif k == "beam":
+            prof = sec.get("profile", "RECT").upper()
+            n1 = sec.get("n1") or [0.0, 0.0, -1.0]
+            if prof == "GENERAL":
+                A, I2, I3, J = sec["dims"][:4]
+                m = spec.materials[sec["material"]]
+                L.append(f"*BEAM GENERAL SECTION, ELSET={_safe(sec['elset'])}, SECTION=GENERAL\n{A:.10g}, {I2:.10g}, 0., {I3:.10g}, {J:.10g}"
+                         f"\n{n1[0]:.6g}, {n1[1]:.6g}, {n1[2]:.6g}\n{m['E']:.10g}, {m['E'] / (2 * (1 + m['nu'])):.10g}")
+            else:
+                L.append(f"*BEAM SECTION, ELSET={_safe(sec['elset'])}, MATERIAL={_safe(sec['material'])}, SECTION={prof}\n"
+                         + ", ".join(f"{x:.10g}" for x in sec["dims"]) + f"\n{n1[0]:.6g}, {n1[1]:.6g}, {n1[2]:.6g}")
+        else:
+            L.append(f"*SOLID SECTION, ELSET={_safe(sec['elset'])}, MATERIAL={_safe(sec['material'])}\n,")
     for name, p in spec.materials.items():
         L.append(f"*MATERIAL, NAME={_safe(name)}")
         if "density" in p:

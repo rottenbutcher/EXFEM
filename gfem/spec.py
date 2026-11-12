@@ -77,10 +77,15 @@ class Spec:
         types, conns = self.element_table()
         surf = Surface(name=name)
         groups = {}
+        from .structural import STRUCT_ELEMENTS
         for e, k in zip(sd["elems"], sd["faces"]):
+            row = np.asarray(conns[e])
+            if types[e] in STRUCT_ELEMENTS:              # shell face: SPOS (0) / SNEG (1)
+                f = row if k == 0 else row[::-1]
+                surf.add(FACETS[len(f)], f[None])
+                continue
             et = ELEMENTS[types[e]]
             loc = et.faces[k]
-            row = np.asarray(conns[e])
             groups.setdefault(len(loc), ([], []))
             groups[len(loc)][0].append(row[loc])
             groups[len(loc)][1].append(self.nodes[row[:et.ncorner]].mean(0))
