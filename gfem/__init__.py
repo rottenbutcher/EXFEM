@@ -21,7 +21,7 @@ from .materials import (LinearElastic, StVenantKirchhoff, NeoHookean, MooneyRivl
 from .model import Model                                                    # noqa: E402
 from .surfaces import Surface                                               # noqa: E402
 from .solvers import (Step, State, Monitor, StaticSolver, RiksSolver,       # noqa: E402
-                      DynamicSolver, ExplicitSolver, modal, buckling, postbuckling,
+                      DynamicSolver, ExplicitSolver, modal, buckling, postbuckling, harmonic,
                       apply_imperfection)
 from .loads import Amplitude                                                # noqa: E402
 from . import mesh, constraints, contact, loads                             # noqa: E402

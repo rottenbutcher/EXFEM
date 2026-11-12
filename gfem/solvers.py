@@ -786,6 +786,13 @@ class ExplicitSolver:
         X = m.X
         nd = m.ndof
         M = m.lumped_mass()
+        if m.rot_of:                                  # rotary inertia scaling (shells / beams)
+            Mn = np.asarray(M).reshape(-1, 3).copy()
+            nodes = np.array(list(m.rot_of.keys()))
+            rows = np.array(list(m.rot_of.values()))
+            lc = min(float(jnp.min(b.charlen(m.X[b.conn]))) for b in m.blocks if hasattr(b, "vis_conn"))
+            Mn[rows] = np.maximum(Mn[rows], Mn[nodes] * lc * lc / 8.0)
+            M = jnp.asarray(Mn.ravel())
         dt_stable = m.stable_dt()
         if step.mass_scaling:                         # target dt by fixed mass scaling
             fac = max(1.0, (step.mass_scaling / (0.8 * dt_stable)) ** 2)
@@ -1029,3 +1036,28 @@ def postbuckling(model, step, modes=(1,), scale=None, monitor=None, riks=None, l
               dloads=step.dloads, riks=rk)
     u, s, info = RiksSolver(model, monitor=mon, linear_solver=linear_solver).solve(st)
     return dict(load_factors=bk["load_factors"], curve=info["curve"], u=u, lpf=info["lpf"])
+
+
+def harmonic(model, step, freqs, damping=0.02, nmodes=30, load=None, state=None, monitor=None):
+    """Harmonic (frequency) response by mode superposition (ANSYS MSUP harmonic):
+        q_j(w) = phi_j^T F / (w_j^2 - w^2 + 2 i zeta w_j w)
+    All frequencies are evaluated in one vectorised device kernel. `load` is the force amplitude
+    vector (default: the step's loads). Returns dict(freq, U (nf, ndof) complex, modes)."""
+    mon = monitor or Monitor(False)
+    st2 = Step(kind="frequency", bcs=step.bcs, nmodes=nmodes, eigensolver=step.eigensolver)
+    res = modal(model, st2, state, mon)
+    st = state or State(model)
+    if load is None:
+        setup = _Setup(model, step, st, _ramp)
+        load = np.asarray(setup.fext(step.T))
+    M = np.asarray(model.lumped_mass())
+    Phi = jnp.asarray(res["modes"])                               # (nm, ndof)
+    gm = jnp.einsum("mi,i,mi->m", Phi, M, Phi)
+    Fm = (Phi @ jnp.asarray(load)) / gm
+    wj = 2 * np.pi * jnp.asarray(res["freq"])
+    w = 2 * np.pi * jnp.asarray(freqs, dtype=float)
+    z = jnp.asarray(damping)
+    H = 1.0 / (wj[None, :] ** 2 - w[:, None] ** 2 + 2j * z * wj[None, :] * w[:, None])   # (nf, nm)
+    U = (H * Fm[None, :]) @ Phi.astype(H.dtype)
+    mon.log(f"  harmonic: {len(freqs)} frequencies x {len(wj)} modes")
+    return dict(freq=np.asarray(freqs), U=np.asarray(U), modal=res)

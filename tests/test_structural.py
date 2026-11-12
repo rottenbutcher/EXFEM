@@ -174,3 +174,38 @@ def test_postbuckling_elastica():
     lateral = np.hypot(U[n, 0], U[n, 1])
     exact = 2 * p / ellipk(p * p) * L
     assert ratio > 1.2 and abs(lateral - exact) / exact < 0.03
+
+
+def test_harmonic_response_static_limit_and_resonance():
+    L, n = 100.0, 20
+    X, c = _line([0, 0, 0], [L, 0, 0], n)
+    m = gfem.Model(X)
+    rho = 7.85e-9
+    m.add_beam(c, gfem.LinearElastic(E, NU, density=rho), ("RECT", (10.0, 1.0)), n1=[0, 1, 0])
+    st = gfem.Step(bcs=[([0], d, 0.0) for d in range(6)], loads=[([n], 2, 1.0)])
+    r = gfem.harmonic(m, st, freqs=[1e-3, 1.0], damping=0.01, nmodes=12)
+    us = np.abs(r["U"][0].reshape(-1, 3)[n, 2])
+    exact = L ** 3 / (3 * E * 10 / 12)
+    assert abs(us - exact) / exact < 0.02           # quasi-static limit (modal truncation)
+    f1 = [f for f in r["modal"]["freq"]][0]
+    rr = gfem.harmonic(m, st, freqs=[f1], damping=0.01, nmodes=12)
+    assert np.abs(rr["U"][0].reshape(-1, 3)[n, 2]) > 20 * us   # resonance amplification ~ 1/(2 zeta)
+
+
+def test_explicit_shell_plate_dynamic_factor():
+    L, W, h, rho = 100.0, 10.0, 2.0, 7.85e-9
+    X, c = _plate(L, W, 10, 2)
+    m = gfem.Model(X)
+    m.add_shell(c, gfem.LinearElastic(E, 0.0, density=rho), h)
+    fix = np.nonzero(X[:, 0] < 1e-9)[0]
+    tip = np.nonzero(X[:, 0] > L - 1e-9)[0]
+    I = W * h ** 3 / 12
+    f1 = 1.875104 ** 2 / (2 * np.pi * L ** 2) * np.sqrt(E * I / (rho * W * h))
+    st = gfem.Step(kind="explicit", time_period=1.0 / f1, bcs=[(fix, d, 0.0) for d in range(6)],
+                   loads=[(tip, 2, 1.0 / len(tip), gfem.Amplitude([[0, 1], [1, 1]]))], frames=40)
+    peak = []
+    mon = gfem.Monitor(False)
+    mon.frame = lambda t, u, s, **k: peak.append(np.asarray(u).reshape(-1, 3)[tip, 2].mean())
+    gfem.ExplicitSolver(m, verbose=False, monitor=mon).solve(st)
+    ust = L ** 3 / (3 * E * I)
+    assert 1.75 < max(peak) / ust < 2.15
