@@ -1,5 +1,20 @@
 # gfem: GPU-accelerated nonlinear FEM with CAD and a Mechanical-style GUI
 
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![JAX](https://img.shields.io/badge/JAX-GPU%20%7C%20CPU-A8B9CC?logo=google&logoColor=white)](https://github.com/jax-ml/jax)
+[![NVIDIA CUDA](https://img.shields.io/badge/NVIDIA-CUDA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
+[![AMD ROCm](https://img.shields.io/badge/AMD-ROCm-ED1C24?logo=amd&logoColor=white)](https://www.amd.com/en/products/software/rocm.html)
+[![NumPy](https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white)](https://numpy.org/)
+[![SciPy](https://img.shields.io/badge/SciPy-8CAAE6?logo=scipy&logoColor=white)](https://scipy.org/)
+[![PyAMG](https://img.shields.io/badge/PyAMG-AMG%20solver-4B8BBE)](https://github.com/pyamg/pyamg)
+[![gmsh](https://img.shields.io/badge/gmsh-mesher-2E6DB4)](https://gmsh.info/)
+[![OpenCASCADE](https://img.shields.io/badge/OpenCASCADE-CAD%20kernel-0065A9)](https://dev.opencascade.org/)
+[![three.js](https://img.shields.io/badge/three.js-3D%20viewer-000000?logo=threedotjs&logoColor=white)](https://threejs.org/)
+[![JavaScript](https://img.shields.io/badge/JavaScript-ES%20modules-F7DF1E?logo=javascript&logoColor=black)](https://developer.mozilla.org/docs/Web/JavaScript)
+[![ParaView](https://img.shields.io/badge/ParaView-.vtu%20output-4A90D9)](https://www.paraview.org/)
+[![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+
 gfem is an open-source structural/thermal finite element package written in Python on
 [JAX](https://github.com/jax-ml/jax). The same code runs on CPU, NVIDIA and AMD GPUs. It has three layers:
 
