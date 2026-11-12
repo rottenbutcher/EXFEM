@@ -203,3 +203,34 @@ def test_implicit_dynamics_step_load():
                    loads=[(tip, 0, F / len(tip), gfem.Amplitude([[0, 1], [1, 1]]))], alpha=0.0)
     gfem.DynamicSolver(m, verbose=False, monitor=mon).solve(st)
     assert 1.8 < max(peak) / ust < 2.2
+
+
+@pytest.mark.parametrize("mu", [0.2, 0.5])
+def test_coulomb_friction_sliding_block(mu):
+    """Upper block pressed onto a fixed block, then dragged sideways: Rx / Rz -> mu."""
+    X1, c1 = mesh.box_hex(2, 2, 1, 4, 4, 2)
+    X2, c2 = mesh.box_hex(1, 1, 1, 2, 2, 2, origin=(0.5, 0.5, 1.0))
+    X = np.vstack([X1, X2])
+    m = gfem.Model(X)
+    m.add_block(c1, E.HEX8_PLAIN, gfem.LinearElastic(EM, NU))
+    m.add_block(c2 + len(X1), E.HEX8_PLAIN, gfem.LinearElastic(EM, NU))
+    n1 = np.arange(len(X1))
+    top1 = n1[np.abs(X1[:, 2] - 1) < 1e-9]
+    bot2 = len(X1) + np.nonzero(np.abs(X2[:, 2] - 1) < 1e-9)[0]
+    sk = m.skin()
+    m.add_interaction(gfem.contact.PenaltyContact(X, sub_surface(sk, set(top1.tolist())),
+                                                  sub_surface(sk, set(bot2.tolist())), E=EM, fkn=10.0, mu=mu))
+    base = _sel(X, lambda x, y, z: z < 1e-9)
+    top = len(X1) + np.nonzero(np.abs(X2[:, 2] - 2) < 1e-9)[0]
+    fix = [(base, d, 0.0) for d in range(3)]
+    s1 = gfem.Step("press", bcs=fix + [(top, 0, 0.0), (top, 1, 0.0), (top, 2, -2e-3)], dt_init=0.5)
+    solver = gfem.StaticSolver(m, verbose=False)
+    st = gfem.State(m)
+    solver.solve(s1, state=st)
+    s2 = gfem.Step("slide", bcs=fix + [(top, 0, 0.02), (top, 1, 0.0), (top, 2, -2e-3)], dt_init=0.1, dt_max=0.1)
+    u, s, info = solver.solve(s2, state=st)
+    R = np.asarray(info["reactions"]).reshape(-1, 3)
+    ratio = abs(R[top, 0].sum()) / abs(R[top, 2].sum())
+    assert abs(ratio - mu) / mu < 0.03
+    U = np.asarray(u).reshape(-1, 3)
+    assert U[bot2, 0].mean() > 0.015            # the block really slid

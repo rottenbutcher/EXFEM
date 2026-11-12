@@ -121,6 +121,9 @@ def build(spec, log=print):
             model.add_constraint(mpc)
         elif c["type"] == "normal":
             model.add_constraint(C.normal_constraint(c["nodes"], c["normal"], c.get("name", "normal")))
+        elif c["type"] == "rigid":
+            from .connectors import rigid_coupling
+            rigid_coupling(model, _nodes(model, spec, c["nodes"]), c.get("point"), c.get("name", "remote"))
         elif c["type"] == "mpc":
             model.add_constraint(C.MPC(c["slave"], c["masters"], c["weights"], c.get("name", "equation")))
         elif c["type"] == "coupling":
@@ -140,6 +143,10 @@ def build(spec, log=print):
                                              augmented=c.get("augmented", True), name=c.get("name", "contact")))
     plan = [_build_step(model, spec, s, elem_block) for s in spec.steps]
     return model, plan
+
+
+def surf_n(model):
+    return getattr(model, "n_real", model.nn)
 
 
 def _surf(model, name):
@@ -169,8 +176,10 @@ def _build_step(model, spec, s, elem_block):
     X = np.asarray(model.X)
     amps = {k: L.Amplitude(v, k) for k, v in spec.amplitudes.items()}
     amp = lambda n: amps.get(n.upper()) if isinstance(n, str) else None
-    bcs = [(np.asarray(b["nodes"]), b["dof"], b["value"], amp(b.get("amp"))) for b in s["bcs"]]
-    loads = [(np.asarray(c["nodes"]), c["dof"], c["value"], amp(c.get("amp"))) for c in s["cloads"]]
+    rem = getattr(model, "remotes", {})
+    rn = lambda b: np.asarray([rem[b["remote"]][0]]) if b.get("remote") else np.asarray(b["nodes"])
+    bcs = [(rn(b), b["dof"], b["value"], amp(b.get("amp"))) for b in s["bcs"]]
+    loads = [(rn(c), c["dof"], c["value"], amp(c.get("amp"))) for c in s["cloads"]]
     pressures, dl = [], []
     for d in s["dsloads"]:
         surf = _surf(model, d["surface"])
@@ -186,6 +195,12 @@ def _build_step(model, spec, s, elem_block):
             dl.append((L.surface_force_vector(X, surf, d["vector"]), a))
         elif kind == "MOMENT":
             dl.append((L.surface_moment_vector(X, surf, d["vector"], d.get("center")), a))
+        elif kind == "REMOTE":
+            from .connectors import remote_force_vector
+            v = remote_force_vector(X[:surf_n(model)], surf, d.get("vector", (0, 0, 0)), d["point"], d.get("moment"))
+            full = np.zeros(model.ndof)
+            full[:len(v)] = v
+            dl.append((full, a))
     for d in s["dloads"]:
         kind = d["kind"].upper()
         blocks = _blocks_of(model, d.get("elset"))
@@ -211,6 +226,13 @@ def _build_step(model, spec, s, elem_block):
                   output_every=s.get("output_every", 1), nlgeom=s.get("nlgeom"))
     step.spec = s
     step.temp_explicit = bool(s["temperatures"])
+    step.bolts = []
+    for k, b in enumerate(s.get("bolts", [])):
+        from .connectors import BoltPretension
+        es = model.elsets.get(b["elset"])
+        if not es:
+            raise BuildError(f"bolt pretension: unknown elset {b['elset']}")
+        step.bolts.append(BoltPretension(model, es, b["axis"], b["force"], b.get("name", f"bolt{k + 1}")))
     return step
 
 
@@ -368,7 +390,20 @@ def run_spec(spec, outdir=".", base="job", verbose=True, monitor=None, write=Tru
         sp = step.spec
         if kind in ("static", "riks", "dynamic", "explicit") and not step.temp_explicit and Tcur is not None:
             step.temperature = Tcur
-        if kind == "static":
+        if kind == "static" and getattr(step, "bolts", None):
+            from .connectors import solve_with_bolts
+            import copy as _copy
+            st0 = _copy.copy(state)
+
+            def _run():
+                s_ = _copy.copy(st0)
+                rec.frames.clear()
+                return S.StaticSolver(model, monitor=rec, linear_solver=opts["linear_solver"],
+                                      tangent=opts["tangent"]).solve(step, state=s_)
+            u, s, info = solve_with_bolts(step.bolts, _run, mon.log)
+            state = info["state"]
+            info = dict(info, bolt_forces={b.name: b.axial_force(u, s) for b in step.bolts})
+        elif kind == "static":
             u, s, info = S.StaticSolver(model, monitor=rec, linear_solver=opts["linear_solver"],
                                         tangent=opts["tangent"]).solve(step, state=state)
         elif kind == "riks":

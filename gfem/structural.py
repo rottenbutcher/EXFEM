@@ -215,7 +215,7 @@ class ShellBlock:
         self.linear = linear
 
         def force_nl(Xe, ue, se, Te, sc):
-            return sc * grad(Xe, ue, se, Te)
+            return sc[0] * grad(Xe, ue, se, Te) if jnp.ndim(sc) else sc * grad(Xe, ue, se, Te)
 
         def stiff_nl(Xe, ue, se, Te, sc):
             return jax.jacfwd(lambda u: force_nl(Xe, u, se, Te, sc))(ue).reshape(24, 24)
@@ -243,7 +243,7 @@ class ShellBlock:
             Xn = Xe[:4]
             return 0.5 * jnp.linalg.norm(jnp.cross(Xn[2] - Xn[0], Xn[3] - Xn[1])) * h
 
-        def cauchy(Xe, ue, se, Te):
+        def cauchy(Xe, ue, se, Te, scv=None):
             Xn, xn = Xe[:4], Xe[:4] + ue[:4]
             dn = jax.vmap(lambda t, d0: rodrigues(t) @ d0)(ue[4:], se)
             dT = jnp.mean(Te[:4, 0] - Te[:4, 1])
@@ -377,7 +377,7 @@ class BeamBlock:
         self.linear = linear
 
         def force_nl(Xe, ue, se, Te, sc):
-            return sc * grad(Xe, ue, se, Te)
+            return sc[0] * grad(Xe, ue, se, Te) if jnp.ndim(sc) else sc * grad(Xe, ue, se, Te)
 
         def stiff_nl(Xe, ue, se, Te, sc):
             return jax.jacfwd(lambda u: force_nl(Xe, u, se, Te, sc))(ue).reshape(12, 12)
@@ -400,7 +400,7 @@ class BeamBlock:
         def volume(Xe):
             return jnp.linalg.norm(Xe[1] - Xe[0]) * A
 
-        def cauchy(Xe, ue, se, Te):
+        def cauchy(Xe, ue, se, Te, scv=None):
             gam, kap, L0, Rm = kin(Xe, ue, se[0])
             N = EA * (gam[0] - alpha * jnp.mean(Te[:2, 0] - Te[:2, 1]))
             sb = jnp.abs(EI2 * kap[1]) * s["c3"] / s["I2"] + jnp.abs(EI3 * kap[2]) * s["c2"] / s["I3"]

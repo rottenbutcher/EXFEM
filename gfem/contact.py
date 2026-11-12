@@ -40,11 +40,53 @@ def _pair(x, k, lam, active):
 _pairs = jax.vmap(_pair)
 
 
+def _bary(xs, x0, x1, x2):
+    e1, e2, d = x1 - x0, x2 - x0, xs - x0
+    d11, d12, d22 = e1 @ e1, e1 @ e2, e2 @ e2
+    b1, b2 = d @ e1, d @ e2
+    den = d11 * d22 - d12 * d12
+    v = (d22 * b1 - d12 * b2) / den
+    w = (d11 * b2 - d12 * b1) / den
+    return jnp.array([1 - v - w, v, w])
+
+
+def _fric_force(x, x0, k, kt, lam, active, t_old, mu):
+    """Normal + Coulomb friction forces on (slave, tri) as residual contributions (4,3),
+    and the tangential traction (3,) for the history update."""
+    g = _gap(x[0], x[1], x[2], x[3])
+    dg = _dgap(x).reshape(4, 3)
+    pn = jnp.maximum(lam - k * g, 0.0) * active
+    n = jnp.cross(x[2] - x[1], x[3] - x[1])
+    n = n / jnp.sqrt(n @ n + 1e-300)
+    P = jnp.eye(3) - jnp.outer(n, n)
+    w = _bary(x[0], x[1], x[2], x[3])
+    slip = (x[0] - x0[0]) - (w @ (x[1:] - x0[1:]))
+    t_tr = P @ t_old - kt * (P @ slip)
+    tn = jnp.sqrt(t_tr @ t_tr + 1e-300)
+    lim = mu * pn
+    t = jnp.where(tn > lim, t_tr * lim / tn, t_tr) * (pn > 0)
+    f = -pn * dg
+    f = f.at[0].add(-t)
+    f = f.at[1:].add(w[:, None] * t[None, :])
+    return f, t
+
+
+def _fric_pair(x, x0, k, kt, lam, active, t_old, mu, nonsym):
+    f, _ = _fric_force(x, x0, k, kt, lam, active, t_old, mu)
+    K = jax.jacfwd(lambda y: _fric_force(y, x0, k, kt, lam, active, t_old, mu)[0])(x).reshape(12, 12)
+    # exact (non-symmetric) tangent for direct solvers, symmetric part for CG / AMG
+    return f, nonsym * K + (1 - nonsym) * 0.5 * (K + K.T)
+
+
+_fric_pairs = jax.vmap(_fric_pair, in_axes=(0, 0, 0, 0, 0, 0, 0, None, None))
+_fric_t = jax.vmap(lambda *a: _fric_force(*a)[1], in_axes=(0, 0, 0, 0, 0, 0, 0, None))
+
+
 class PenaltyContact:
     kind = "contact"
 
     def __init__(self, X, master_surface, slave, stiffness=None, fkn=1.0, E=None,
-                 tol=None, name="contact", augmented=False):
+                 tol=None, name="contact", augmented=False, mu=0.0, ftkn=1.0):
         """`slave`: Surface (area-weighted penalty, recommended) or node array.
         Normal stiffness per slave node: k = fkn * E * A_node / h (ANSYS FKN convention)."""
         from .surfaces import Surface
@@ -67,6 +109,9 @@ class PenaltyContact:
             k = np.full(len(self.slave), fkn * E * h)
         self.k = k
         self.lam = np.zeros(len(self.slave))
+        self.mu, self.ftkn = float(mu), float(ftkn)
+        self.t_old = np.zeros((len(self.slave), 3))
+        self.u_start = None
         self.augmented = augmented
         self.ns = len(self.slave)
         self.last = None
@@ -87,13 +132,32 @@ class PenaltyContact:
         active = ((lateral < 0.05 * self.h) & (g > -self.depth)).astype(float)
         nodes = np.concatenate([self.slave[:, None], tri], 1)
         self.last = dict(gap=g, active=active)
-        return dict(nodes=jnp.asarray(nodes), active=jnp.asarray(active),
-                    lam=jnp.asarray(self.lam), k=jnp.asarray(self.k))
+        p = dict(nodes=jnp.asarray(nodes), active=jnp.asarray(active),
+                 lam=jnp.asarray(self.lam), k=jnp.asarray(self.k))
+        if self.mu > 0:
+            if self.u_start is None:
+                self.u_start = np.asarray(u).copy()
+            x0 = (X + self.u_start.reshape(-1, 3))[nodes]
+            p.update(x0=jnp.asarray(x0), t_old=jnp.asarray(self.t_old), mu=jnp.asarray(self.mu),
+                     kt=jnp.asarray(self.k * self.ftkn), nonsym=jnp.asarray(float(getattr(self, "nonsym", 0.0))))
+        self._last_p = p
+        return p
+
+    def commit(self, X, u):
+        """Accept the increment: store the tangential traction (stick/slip history)."""
+        if self.mu > 0 and getattr(self, "_last_p", None) is not None:
+            p = self.params(X, u)
+            x = (jnp.asarray(X) + jnp.asarray(u).reshape(-1, 3))[p["nodes"]]
+            self.t_old = np.asarray(_fric_t(x, p["x0"], p["k"], p["kt"], p["lam"], p["active"], p["t_old"], p["mu"]))
+            self.u_start = np.asarray(u).copy()
 
     @staticmethod
     def evaluate(X, u, p, ndof):
         x = (X + u.reshape(-1, 3))[p["nodes"]]
-        f, K = _pairs(x, p["k"], p["lam"], p["active"])
+        if "mu" in p:
+            f, K = _fric_pairs(x, p["x0"], p["k"], p["kt"], p["lam"], p["active"], p["t_old"], p["mu"], p["nonsym"])
+        else:
+            f, K = _pairs(x, p["k"], p["lam"], p["active"])
         fg = jnp.zeros((ndof // 3, 3)).at[p["nodes"]].add(f).reshape(-1)
         dofs = (p["nodes"][:, :, None] * 3 + jnp.arange(3)).reshape(-1, 12)
         return fg, (dofs, K)

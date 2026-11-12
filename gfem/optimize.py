@@ -59,7 +59,7 @@ def topology_optimization(model, step, volfrac=0.4, penal=3.0, rmin=None, iters=
         U = u.reshape(-1, 3)
         out = []
         for b, s in zip(m.blocks, zero_s):
-            fe, _ = b.force(m.X[b.conn], U[b.conn], s, jnp.zeros(b.conn.shape + (2,)), jnp.ones(b.ne))
+            fe, _ = b.force(m.X[b.conn], U[b.conn], s, jnp.zeros(b.conn.shape + (2,)), jnp.concatenate([jnp.ones((b.ne, 1)), jnp.zeros((b.ne, 9))], 1))
             out.append(jnp.einsum("eai,eai->e", fe, U[b.conn]))
         return jnp.concatenate(out)
 

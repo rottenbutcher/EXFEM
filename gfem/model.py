@@ -42,47 +42,55 @@ class Block:
             if et.fbar:
                 J0inv = jnp.linalg.inv(Xe.T @ dN0)
                 F0 = I3 + ue.T @ (dN0 @ J0inv)
-                J = jnp.linalg.det(F)
-                F = F * ((jnp.linalg.det(F0) / J) ** (1 / 3))[:, None, None]
+                if fs:          # F-bar (finite strain)
+                    J = jnp.linalg.det(F)
+                    F = F * ((jnp.linalg.det(F0) / J) ** (1 / 3))[:, None, None]
+                else:           # B-bar (linear): replace the volumetric part by the centroid value
+                    tr0 = jnp.trace(F0) - 3.0
+                    tr = jnp.trace(F, axis1=1, axis2=2) - 3.0
+                    F = F + ((tr0 - tr) / 3.0)[:, None, None] * I3
             return F
 
-        def stress_gp(F, s, T, T0):
+        def stress_gp(F, s, T, T0, eig):
             """Thermal strain alpha (T - T_initial) (Abaqus convention: no thermal strain at the
-            initial temperature): additive for small-strain models, multiplicative
-            F = Fe (theta I), P = theta^2 Pe(Fe) for finite-strain models."""
+            initial temperature) and eigenstrain `eig` (bolt pretension): additive for small-strain
+            models, multiplicative F = Fe Fp with Fp = (1 + th) (I + eig) for finite-strain models."""
             th = alpha * (T - T0)
             if fs:
-                P, sn = mat.pk1T(F / (1.0 + th), s, T)
-                return P * (1.0 + th) ** 2, sn
-            return mat.pk1T(F - th * I3, s, T)
+                Fp_inv = jnp.linalg.inv(I3 + eig) / (1.0 + th)
+                P, sn = mat.pk1T(F @ Fp_inv, s, T)
+                return P @ Fp_inv.T * jnp.linalg.det(jnp.linalg.inv(Fp_inv)), sn
+            return mat.pk1T(F - th * I3 - eig, s, T)
 
-        def stress(F, se, Te):
+        def stress(F, se, Te, eig):
             """Te: (nn, 2) nodal [T, T_initial]."""
             Tg = N @ Te
-            return jax.vmap(stress_gp)(F, se, Tg[:, 0], Tg[:, 1])
+            return jax.vmap(stress_gp, in_axes=(0, 0, 0, 0, None))(F, se, Tg[:, 0], Tg[:, 1], eig)
 
-        def force(Xe, ue, se, Te, sc):
+        def force(Xe, ue, se, Te, scv):
+            sc, eig = scv[0], scv[1:10].reshape(3, 3)
             dNdX, vol = geom(Xe)
             if et.fbar:
                 F, pullback = jax.vjp(lambda u: defgrad(Xe, u, dNdX), ue)
-                P, snew = stress(F, se, Te)
+                P, snew = stress(F, se, Te, eig)
                 fe = pullback(P * (sc * vol)[:, None, None])[0]
             else:
                 F = defgrad(Xe, ue, dNdX)
-                P, snew = stress(F, se, Te)
+                P, snew = stress(F, se, Te, eig)
                 fe = jnp.einsum("gij,gaj,g->ai", P, dNdX, sc * vol)
             return fe, snew
 
-        def stiff(Xe, ue, se, Te, sc):
+        def stiff(Xe, ue, se, Te, scv):
             nn = ue.shape[0]
             if et.fbar:
-                K = jax.jacfwd(lambda u: force(Xe, u, se, Te, sc)[0])(ue)
+                K = jax.jacfwd(lambda u: force(Xe, u, se, Te, scv)[0])(ue)
                 return K.reshape(nn * 3, nn * 3)
             # fast path: material tangent A = dP/dF per point (9 AD directions instead of 3*nn)
+            sc, eig = scv[0], scv[1:10].reshape(3, 3)
             dNdX, vol = geom(Xe)
             F = defgrad(Xe, ue, dNdX)
             Tg = N @ Te
-            A = jax.vmap(jax.jacfwd(lambda f, s, t, t0: stress_gp(f, s, t, t0)[0]))(F, se, Tg[:, 0], Tg[:, 1])
+            A = jax.vmap(jax.jacfwd(lambda f, s, t, t0: stress_gp(f, s, t, t0, eig)[0]))(F, se, Tg[:, 0], Tg[:, 1])
             K = jnp.einsum("gaj,gijkl,gbl,g->aibk", dNdX, A, dNdX, sc * vol)
             return K.reshape(nn * 3, nn * 3)
 
@@ -102,10 +110,10 @@ class Block:
         def volume(Xe):
             return geom(Xe)[1].sum()
 
-        def cauchy(Xe, ue, se, Te):
+        def cauchy(Xe, ue, se, Te, scv):
             dNdX, vol = geom(Xe)
             F = defgrad(Xe, ue, dNdX)
-            P, snew = stress(F, se, Te)
+            P, snew = stress(F, se, Te, scv[1:10].reshape(3, 3))
             J = jnp.linalg.det(F)
             sig = P if mat.small_strain else jnp.einsum("gij,gkj->gik", P, F) / J[:, None, None]
             wv = vol / vol.sum()
@@ -272,12 +280,20 @@ class Model:
         return dict(T=jnp.zeros(self.nn), scale=[jnp.ones(b.ne) for b in self.blocks])
 
     def _fields(self, fields):
+        """Returns nodal [T, T0] (nn, 2) and per block element data (ne, 10) =
+        [stiffness scale, eigenstrain (9)]."""
         f = self.default_fields() if fields is None else fields
         T0 = jnp.zeros(self.nn) if self.T0 is None else jnp.asarray(self.T0)
         T = f.get("T")
         T = T0 if T is None else T
-        sc = f.get("scale") or [jnp.ones(b.ne) for b in self.blocks]
-        return jnp.stack([T, T0], 1), sc
+        sc = f.get("scale") or [None] * len(self.blocks)
+        eig = f.get("eig") or getattr(self, "eigenstrain", None) or [None] * len(self.blocks)
+        out = []
+        for b, s, e in zip(self.blocks, sc, eig):
+            s = jnp.ones(b.ne) if s is None else jnp.asarray(s)
+            e = jnp.zeros((b.ne, 9)) if e is None else jnp.asarray(e).reshape(b.ne, 9)
+            out.append(jnp.concatenate([s[:, None], e], 1))
+        return jnp.stack([T, T0], 1), out
 
     # ---------- global operators (all jit-able) ----------
     def internal_force(self, u, states, fields=None):
@@ -338,11 +354,11 @@ class Model:
         return max(b.material.modulus() for b in self.blocks)
 
     def stresses(self, u, states, fields=None):
-        T, _ = self._fields(fields)
+        T, sc = self._fields(fields)
         U = u.reshape(-1, 3)
         out = []
-        for b, s in zip(self.blocks, states):
-            sig, ep, F = b.cauchy(self.X[b.conn], U[b.conn], s, T[b.conn])
+        for b, s, c in zip(self.blocks, states, sc):
+            sig, ep, F = b.cauchy(self.X[b.conn], U[b.conn], s, T[b.conn], c)
             dev = sig - jnp.trace(sig, axis1=1, axis2=2)[:, None, None] / 3 * I3
             mises = jnp.sqrt(1.5 * jnp.sum(dev * dev, axis=(1, 2)))
             out.append(dict(S=sig, MISES=mises, PEEQ=ep, F=F))

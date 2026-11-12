@@ -371,6 +371,8 @@ class StaticSolver:
         setup = _Setup(m, step, st, _ramp)
         self.setup = setup
         self.lin.reset()
+        for c in m.interactions:
+            c.nonsym = 1.0 if self.lin.method == "direct" else 0.0
         u, states = st.u, st.states
         t, dt, inc, history = 0.0, min(step.dt_init, step.T), 0, []
         t0 = time.time()
@@ -404,6 +406,9 @@ class StaticSolver:
                 ok, it2, ui, s_try, rh = self._newton(ui, states, fext, tn, fields, setup, inc)
                 it += it2
             if ok:
+                for c in m.interactions:
+                    if hasattr(c, "commit"):
+                        c.commit(m.X, ui)
                 u, states, t = ui, s_try, tn
                 history.append((t, it))
                 self.mon.log(f"  inc {inc:4d}  t={t:.4g}  dt={dt:.3g}  iters={it}  lin={self.lin.last_iters}")
