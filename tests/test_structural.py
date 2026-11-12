@@ -155,3 +155,22 @@ def test_shell_beam_inp_roundtrip(tmp_path):
     sp.elsets.pop("STIFF")
     _, r3 = run_spec(sp, str(tmp_path), "c", verbose=False, write=False)
     assert np.abs(r3[0]["frames"][-1]["U"][:, 2]).max() > 1.2 * np.abs(U1[:, 2]).max()
+
+
+def test_postbuckling_elastica():
+    """Imperfect fixed-free column traced by Riks vs the exact elastica:
+    P/Pcr = (2K(p)/pi)^2, tip lateral deflection = 2p/K(p) L."""
+    from scipy.special import ellipk
+    from scipy.optimize import brentq
+    L, n = 400.0, 20
+    X, c = _line([0, 0, 0], [0, 0, L], n)
+    m = gfem.Model(X)
+    m.add_beam(c, gfem.StVenantKirchhoff(E, NU), ("RECT", (20., 20.)), n1=[1, 0, 0])
+    st = gfem.Step(bcs=[([0], d, 0.) for d in range(6)], loads=[([n], 2, -1.0)])
+    r = gfem.postbuckling(m, st, modes=(1,), scale=0.2, riks=dict(max_inc=30, lpf_max=1.6 * 41135))
+    ratio = r["lpf"] / r["load_factors"][0]
+    p = brentq(lambda p: (2 * ellipk(p * p) / np.pi) ** 2 - ratio, 1e-6, 0.999999)
+    U = np.asarray(r["u"]).reshape(-1, 3)
+    lateral = np.hypot(U[n, 0], U[n, 1])
+    exact = 2 * p / ellipk(p * p) * L
+    assert ratio > 1.2 and abs(lateral - exact) / exact < 0.03

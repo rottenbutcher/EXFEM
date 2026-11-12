@@ -60,7 +60,7 @@ class Step:
                  dt_min=None, dt_max=None, max_inc=1000, bcs=(), loads=(), dt=None, frames=20,
                  damping=0.0, pressures=(), dloads=(), temperature=None, amplitude=None,
                  nmodes=10, shift=0.0, riks=None, alpha=-0.05, output_every=1, mass_scaling=None,
-                 nlgeom=None):
+                 nlgeom=None, eigensolver="auto"):
         self.name, self.kind, self.T = name, kind, float(time_period)
         self.dt_init = dt_init or self.T
         self.dt_min = dt_min if dt_min is not None else 1e-5 * self.T
@@ -77,6 +77,7 @@ class Step:
         self.output_every = output_every
         self.mass_scaling = mass_scaling
         self.nlgeom = nlgeom
+        self.eigensolver = eigensolver
 
 
 class State:
@@ -225,12 +226,13 @@ class _LinearSystem:
     """Solves (free T^T K T free + fixed I) x = b with the chosen back-end."""
 
     def __init__(self, model, method="auto", tangent="ebe", cg_tol=1e-9, cg_maxiter=20000,
-                 monitor=None):
+                 monitor=None, multi_gpu=True):
         self.m = model
         if method == "auto":
             gpu = jax.default_backend() != "cpu"
             method = "direct" if (model.ndof <= (20000 if gpu else 40000)) else "amg"
         self.method, self.tangent = method, tangent
+        self.multi_gpu = multi_gpu
         self.cg_tol, self.cg_maxiter = cg_tol, cg_maxiter
         self.amg = None
         self.amg_iters0 = None
@@ -277,8 +279,67 @@ class _LinearSystem:
         A = setup.tr.project_matrix(A)
         return linalg.bc_matrix(A, setup.free_np)
 
+    def _mixed(self, ops, b, setup, rebuild):
+        """FP32 AMG-PCG inner solves + FP64 iterative refinement (defect correction).
+        The FP64 residual keeps full accuracy while >95% of the flops run in FP32 - the fast
+        path on GeForce / RTX / L4 / L40 class NVIDIA GPUs whose FP64 rate is 1/32-1/64."""
+        f32 = jnp.float32
+        tp = setup.tr.params()
+        nd = self.m.ndof
+        if self.amg is None or rebuild:
+            t0 = time.time()
+            self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
+                                  rot_mask=self.m.rot_mask() if self.m.rot_of else None)
+            self.mon.log(f"    {self.amg.info()} (mixed FP32/FP64)  setup {time.time() - t0:.2f}s")
+            self._mixed_fn = None
+        if getattr(self, "_mixed_fn", None) is None:
+            pre = self.amg.make()
+            opA = self._opA
+
+            def inner(ops32, r32, free32, tp32, pp32):
+                A = lambda v: opA(ops32, free32, tp32, None, v)
+                M = lambda q: free32 * pre(pp32, free32 * q) + (1 - free32) * q
+                return linalg.pcg(A, r32, M, tol=2e-5, maxiter=self.cg_maxiter)
+
+            self._mixed_fn = (jax.jit(inner), jax.jit(lambda ops, free, tp, v: opA(ops, free, tp, None, v)))
+        inner, A64 = self._mixed_fn
+        cast = lambda t: jax.tree_util.tree_map(lambda a: a.astype(f32) if hasattr(a, "dtype") and jnp.issubdtype(a.dtype, jnp.floating) else a, t)
+        ops32, pp32, tp32 = cast(ops), cast(self.amg.params()), cast(tp)
+        free32 = setup.free.astype(f32)
+        x = jnp.zeros_like(b)
+        r = b
+        bn = float(jnp.linalg.norm(b)) or 1.0
+        its = 0
+        for _ in range(12):
+            sc = float(jnp.linalg.norm(r)) or 1.0
+            d, k, _ = inner(ops32, (r / sc).astype(f32), free32, tp32, pp32)
+            its += int(k)
+            x = x + d.astype(b.dtype) * sc
+            r = b - A64(ops, setup.free, tp, x)
+            if float(jnp.linalg.norm(r)) <= self.cg_tol * bn:
+                break
+        self.last_iters = its
+        return x
+
+    def _gpu_direct(self, ops, b, setup):
+        """Sparse direct solve on the device (cuSOLVER through jax.experimental.sparse)."""
+        from jax.experimental.sparse.linalg import spsolve
+        A = self.assemble(ops, setup).tocsr()
+        A.sort_indices()
+        x = spsolve(jnp.asarray(A.data), jnp.asarray(A.indices.astype(np.int32)),
+                    jnp.asarray(A.indptr.astype(np.int32)), jnp.asarray(b), tol=0)
+        self.last_iters = 1
+        return x
+
     def solve(self, ops, b, setup, jvp_args=None, rebuild=False):
         tp = setup.tr.params()
+        if self.multi_gpu and jax.device_count() > 1 and self.method not in ("direct", "gpu_direct"):
+            from .parallel import shard_ops
+            ops = shard_ops(ops)
+        if self.method == "mixed" and jvp_args is None:
+            return self._mixed(ops, b, setup, rebuild)
+        if self.method == "gpu_direct":
+            return self._gpu_direct(ops, b, setup)
         if self.method == "direct":
             if jvp_args is not None:
                 raise ValueError("direct solver requires tangent='ebe'")
@@ -293,7 +354,8 @@ class _LinearSystem:
         else:
             if self.amg is None or rebuild:
                 t0 = time.time()
-                self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X))
+                self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
+                                      rot_mask=self.m.rot_mask() if self.m.rot_of else None)
                 self.amg_iters0 = None
                 self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
             x, k, rr = self._pcg_fn("amg", self.amg)(ops, b, setup.free, tp, self.amg.params(), jvp_args)
@@ -837,33 +899,44 @@ def modal(model, step, state=None, monitor=None):
     mon = monitor or Monitor(False)
     st = state or State(model)
     t0 = time.time()
-    ops = model.stiffness_ops(st.u, st.states)
-    K, keep, setup = _reduced(model, step, st, ops)
-    M = np.asarray(model.lumped_mass())
-    if setup.tr.active:
-        M = (setup.tr.T.T @ sp.diags(M) @ setup.tr.T).diagonal()
-    Mk = sp.diags(M[keep]).tocsc()
-    nm = min(step.nmodes, K.shape[0] - 2)
-    sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
-    mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
-    w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
-    order = np.argsort(w2)
-    w2, V = w2[order], V[:, order]
-    w2 = np.maximum(w2, 0.0)
-    modes = np.zeros((nm, model.ndof))
-    modes[:, keep] = V.T
-    if setup.tr.active:
-        modes = np.asarray([setup.tr.T @ mm for mm in modes])
+    method = getattr(step, "eigensolver", "auto") or "auto"
+    if method == "auto":
+        gpu = jax.default_backend() != "cpu"
+        method = "lobpcg" if (model.ndof > (30000 if gpu else 400000)) else "lanczos"
+    if method == "lobpcg":
+        from .eigen import modal_lobpcg
+        w2, modes = modal_lobpcg(model, step, st, mon)
+        nm = len(w2)
+    else:
+        ops = model.stiffness_ops(st.u, st.states)
+        K, keep, setup = _reduced(model, step, st, ops)
+        M = np.asarray(model.lumped_mass())
+        if setup.tr.active:
+            M = (setup.tr.T.T @ sp.diags(M) @ setup.tr.T).diagonal()
+        Mk = sp.diags(M[keep]).tocsc()
+        nm = min(step.nmodes, K.shape[0] - 2)
+        sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
+        mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
+        w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
+        order = np.argsort(w2)
+        w2, V = w2[order], V[:, order]
+        w2 = np.maximum(w2, 0.0)
+        modes = np.zeros((nm, model.ndof))
+        modes[:, keep] = V.T
+        if setup.tr.active:
+            modes = np.asarray([setup.tr.T @ mm for mm in modes])
     freq = np.sqrt(w2) / (2 * np.pi)
     # participation factors and effective mass in x, y, z
     Mfull = np.asarray(model.lumped_mass())
     r = np.zeros((3, model.ndof))
+    trans_rows = np.ones(model.nn, bool)
+    trans_rows[list(model.rot_of.values())] = False
     for d in range(3):
-        r[d, d::3] = 1.0
+        r[d, d::3] = trans_rows
     gm = np.einsum("mi,i,mi->m", modes, Mfull, modes)
     part = np.einsum("mi,i,di->md", modes, Mfull, r) / gm[:, None]
     meff = part ** 2 * gm[:, None]
-    total = np.array([np.sum(Mfull[d::3]) for d in range(3)])
+    total = np.array([np.sum(Mfull[d::3] * trans_rows) for d in range(3)])
     for i, f in enumerate(freq):
         mon.log(f"    mode {i + 1:3d}: f = {f:.6g}  eff.mass ratio x/y/z = "
                 + " ".join(f"{x:.3f}" for x in meff[i] / np.maximum(total, 1e-300)))
@@ -881,28 +954,78 @@ def buckling(model, step, state=None, monitor=None):
     mon = monitor or Monitor(False)
     st = state or State(model)
     t0 = time.time()
-    solver = StaticSolver(model, linear_solver="direct", verbose=False)
+    solver = StaticSolver(model, linear_solver=getattr(step, "linear_solver", "auto") or "auto", verbose=False)
     s1 = Step("base", bcs=[(b[0], b[1], 0.0) for b in step.bcs], loads=step.loads,
               pressures=[(p[0], p[1]) for p in step.pressures], dloads=step.dloads)
     u, states, _ = solver.solve(s1, state=State(model))
     stress = model.stresses(u, states)
-    K0, keep, setup = _reduced(model, step, st, model.stiffness_ops(jnp.zeros(model.ndof), model.init_state()))
-    KG, _, _ = _reduced(model, step, st, model.geometric_ops(stress, u, states))
-    nm = min(step.nmodes, K0.shape[0] - 2)
-    lu = spla.splu(K0.tocsc())
-    Kinv = spla.LinearOperator(K0.shape, matvec=lu.solve, dtype=float)
-    mon.log(f"  buckling: {K0.shape[0]} free dofs, {nm} modes")
-    mu, V = spla.eigsh(-KG, k=nm, M=K0, Minv=Kinv, which="LA")
-    order = np.argsort(-mu)
-    mu, V = mu[order], V[:, order]
-    lam = np.where(mu > 0, 1.0 / np.where(mu > 0, mu, 1), np.inf)
-    modes = np.zeros((nm, model.ndof))
-    modes[:, keep] = V.T
-    if setup.tr.active:
-        modes = np.asarray([setup.tr.T @ mm for mm in modes])
+    K0ops = model.stiffness_ops(jnp.zeros(model.ndof), model.init_state())
+    KGops = model.geometric_ops(stress, u, states)
+    method = getattr(step, "eigensolver", "auto") or "auto"
+    if method == "auto":
+        gpu = jax.default_backend() != "cpu"
+        method = "lobpcg" if (model.ndof > (30000 if gpu else 400000)) else "lanczos"
+    if method == "lobpcg":
+        from .eigen import buckling_lobpcg
+        setup = _Setup(model, step, st, _ramp)
+        lam, modes = buckling_lobpcg(model, K0ops, KGops, setup, step.nmodes, mon)
+        order = np.argsort(lam)
+        lam, modes = lam[order], modes[order]
+    else:
+        K0, keep, setup = _reduced(model, step, st, K0ops)
+        KG, _, _ = _reduced(model, step, st, KGops)
+        nm = min(step.nmodes, K0.shape[0] - 2)
+        lu = spla.splu(K0.tocsc())
+        Kinv = spla.LinearOperator(K0.shape, matvec=lu.solve, dtype=float)
+        mon.log(f"  buckling: {K0.shape[0]} free dofs, {nm} modes")
+        mu, V = spla.eigsh(-KG, k=nm, M=K0, Minv=Kinv, which="LA")
+        order = np.argsort(-mu)
+        mu, V = mu[order], V[:, order]
+        lam = np.where(mu > 0, 1.0 / np.where(mu > 0, mu, 1), np.inf)
+        modes = np.zeros((nm, model.ndof))
+        modes[:, keep] = V.T
+        if setup.tr.active:
+            modes = np.asarray([setup.tr.T @ mm for mm in modes])
     for i, l in enumerate(lam):
         mon.log(f"    mode {i + 1:3d}: load multiplier = {l:.6g}")
         mon.frame(float(i + 1), jnp.asarray(modes[i] / max(np.abs(modes[i]).max(), 1e-300)),
                   st.states, step=step.name, mode=i + 1, eigenvalue=float(l))
     mon.log(f"  buckling done: {time.time() - t0:.2f}s")
     return dict(load_factors=lam, modes=modes, base_u=u)
+
+
+def apply_imperfection(model, modes, scales):
+    """Geometric imperfection (Abaqus *IMPERFECTION): X += sum_i s_i phi_i, every mode normalised
+    to a maximum translational amplitude of 1 (rotation rows untouched)."""
+    X = np.array(model.X)
+    nr = getattr(model, "n_real", model.nn)
+    dX = np.zeros_like(X)
+    for phi, s in zip(modes, scales):
+        P = np.asarray(phi).reshape(-1, 3).copy()
+        P[list(model.rot_of.values())] = 0.0
+        P[nr:] = 0.0
+        amp = np.abs(P[:nr]).max()
+        dX += s * P / max(amp, 1e-300)
+    for n, r in model.rot_of.items():
+        dX[r] = dX[n]                      # rotation rows follow their node's coordinates
+    model.X = jnp.asarray(X + dX)
+    return dX
+
+
+def postbuckling(model, step, modes=(1,), scale=None, monitor=None, riks=None, linear_solver="auto"):
+    """Nonlinear (post-)buckling: eigenvalue buckling -> imperfection from the selected modes ->
+    Riks arc-length along the equilibrium path. Returns dict(load_factors, curve, u)."""
+    mon = monitor or Monitor(False)
+    bk = buckling(model, Step(kind="buckle", bcs=step.bcs, loads=step.loads, pressures=step.pressures,
+                              dloads=step.dloads, nmodes=max(modes), eigensolver=step.eigensolver), monitor=mon)
+    if scale is None:
+        scale = 1e-3 * model.char_length() * 10
+    apply_imperfection(model, [bk["modes"][i - 1] for i in modes], [scale] * len(modes))
+    mon.log(f"  imperfection: modes {list(modes)}, amplitude {scale:.4g}")
+    lam1 = float(bk["load_factors"][0])
+    rk = dict(dlam0=0.05 * lam1, lpf_max=1.5 * lam1, max_inc=60)
+    rk.update(riks or {})
+    st = Step("postbuckling", kind="riks", bcs=step.bcs, loads=step.loads, pressures=step.pressures,
+              dloads=step.dloads, riks=rk)
+    u, s, info = RiksSolver(model, monitor=mon, linear_solver=linear_solver).solve(st)
+    return dict(load_factors=bk["load_factors"], curve=info["curve"], u=u, lpf=info["lpf"])

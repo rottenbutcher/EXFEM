@@ -60,28 +60,35 @@ def csr_mv(M, x, n):
                                indices_are_sorted=True)
 
 
-def rigid_body_modes(X):
+def rigid_body_modes(X, rot_mask=None):
+    """Near-null space for elasticity; rotation rows (shells/beams) get unit rotations."""
     X = np.asarray(X)
     n = len(X)
-    c = X - X.mean(0)
+    t = np.ones(n) if rot_mask is None else (~np.asarray(rot_mask)).astype(float)
+    c = (X - X[t > 0].mean(0)) * t[:, None]
     B = np.zeros((3 * n, 6))
     for i in range(3):
-        B[i::3, i] = 1.0
+        B[i::3, i] = t
     x, y, z = c[:, 0], c[:, 1], c[:, 2]
     B[0::3, 3], B[1::3, 3] = -y, x
     B[1::3, 4], B[2::3, 4] = -z, y
     B[0::3, 5], B[2::3, 5] = z, -x
+    if rot_mask is not None:
+        r = 1.0 - t
+        B[2::3, 3] += r          # rotation about z
+        B[0::3, 4] += r          # rotation about x
+        B[1::3, 5] += r          # rotation about y
     return B
 
 
 # ------------------------------------------------------------------ AMG
 class AMG:
-    def __init__(self, A, X=None, max_coarse=300, degree=2, presmooth=1):
+    def __init__(self, A, X=None, max_coarse=300, degree=2, presmooth=1, rot_mask=None):
         import pyamg
         import scipy.sparse as sp
         A = A.tocsr()
         n = A.shape[0]
-        B = rigid_body_modes(X) if X is not None and n == 3 * len(X) else np.ones((n, 1))
+        B = rigid_body_modes(X, rot_mask) if X is not None and n == 3 * len(X) else np.ones((n, 1))
         if B.shape[1] == 6:
             Ab = sp.bsr_matrix(A, blocksize=(3, 3))
         else:
