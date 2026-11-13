@@ -280,7 +280,8 @@ class CadModel:
                 bounded = {abs(t) for v in vols for _, t in g.model.getBoundary([v], oriented=False)}
                 sheets = [(2, t) for _, t in g.model.getEntities(2) if t not in bounded]
                 on_face = {abs(t) for _, f in g.model.getEntities(2) for _, t in g.model.getBoundary([(2, f)], oriented=False)}
-                curves = [(1, t) for _, t in g.model.getEntities(1) if t not in on_face]
+                curves = [(1, t) for _, t in g.model.getEntities(1)
+                          if t not in on_face and not len(g.model.getAdjacencies(1, t)[0])]
                 vols = vols + sheets + curves
                 if self.share_topology and len(vols) > 1:
                     try:
@@ -561,7 +562,8 @@ class CadModel:
                 face_edges.add(abs(e))
         line_owned = {t for (d, t) in getattr(self, "_owner", {}) if d == 1}
         for e in info["edges"]:
-            if e["id"] not in face_edges or e["id"] in line_owned:
+            # seam edges of periodic faces are missing from getBoundary: use upward adjacency too
+            if (e["id"] not in face_edges and not e["faces"]) or e["id"] in line_owned:
                 e["free"] = True
                 info.setdefault("lines", []).append(dict(id=e["id"], length=e["length"], com=e["com"], sig=e["sig"],
                                                          feature=getattr(self, "_owner", {}).get((1, e["id"]))))

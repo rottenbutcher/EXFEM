@@ -1,0 +1,249 @@
+{
+ "version": 2,
+ "name": "L-bracket - random vibration + fatigue",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "extrude",
+    "name": "L profile",
+    "plane": "XY",
+    "loops": [
+     {
+      "points": [
+       [
+        0,
+        0
+       ],
+       [
+        120,
+        0
+       ],
+       [
+        120,
+        12
+       ],
+       [
+        12,
+        12
+       ],
+       [
+        12,
+        80
+       ],
+       [
+        0,
+        80
+       ]
+      ]
+     }
+    ],
+    "distance": 40
+   },
+   {
+    "id": "F2",
+    "type": "cylinder",
+    "name": "Hole 1",
+    "x": 40,
+    "y": -1,
+    "z": 20,
+    "dx": 0,
+    "dy": 14,
+    "dz": 0,
+    "r": 6
+   },
+   {
+    "id": "F3",
+    "type": "cylinder",
+    "name": "Hole 2",
+    "x": 90,
+    "y": -1,
+    "z": 20,
+    "dx": 0,
+    "dy": 14,
+    "dz": 0,
+    "r": 6
+   },
+   {
+    "id": "F4",
+    "type": "boolean",
+    "name": "Bolt holes",
+    "op": "cut",
+    "target": [
+     "F1"
+    ],
+    "tool": [
+     "F2",
+     "F3"
+    ]
+   },
+   {
+    "id": "F5",
+    "type": "cylinder",
+    "name": "Pin hole",
+    "x": -1,
+    "y": 60,
+    "z": 20,
+    "dx": 14,
+    "dy": 0,
+    "dz": 0,
+    "r": 8
+   },
+   {
+    "id": "F6",
+    "type": "boolean",
+    "name": "Cut pin hole",
+    "op": "cut",
+    "target": [
+     "F4"
+    ],
+    "tool": [
+     "F5"
+    ]
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1",
+   "ultimate": 460.0,
+   "Sf": 750.0,
+   "b": -0.09,
+   "Se": 0.0
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     40.66282375848227,
+     19.808853680151312,
+     19.999999999999993
+    ],
+    "size": 85112.92078934147
+   }
+  }
+ },
+ "mesh": {
+  "size": 4.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "random_vibration",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 10,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0,
+  "direction": [
+   0,
+   1,
+   0
+  ],
+  "damping_ratio": 0.02,
+  "psd": [
+   [
+    20.0,
+    10000.0
+   ],
+   [
+    80.0,
+    400000.0
+   ],
+   [
+    500.0,
+    400000.0
+   ],
+   [
+    2000.0,
+    10000.0
+   ]
+  ]
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     6,
+     7
+    ],
+    "sigs": [
+     {
+      "com": [
+       40.0,
+       6.0,
+       19.999999999999996
+      ],
+      "size": 452.3893421169302,
+      "type": "Cylinder"
+     },
+     {
+      "com": [
+       89.99999999999999,
+       6.0,
+       19.999999999999996
+      ],
+      "size": 452.3893421169302,
+      "type": "Cylinder"
+     }
+    ]
+   }
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "1-sigma Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "1-sigma Equivalent Stress"
+  },
+  {
+   "id": "R3",
+   "type": "fatigue_sf",
+   "name": "Fatigue Safety Factor (1-sigma)"
+  }
+ ]
+}

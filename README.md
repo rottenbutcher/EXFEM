@@ -89,6 +89,8 @@ python -m pytest tests
 | ![bracket](docs/img/result_bracket.png) | ![contact](docs/img/contact.png) |
 | ![topology](docs/img/topology.png) | ![sketcher](docs/img/sketcher.png) |
 
+See [examples/README.md](examples/README.md) for ready-to-run GUI projects, CAD files, solver decks and scripts.
+
 ## What sets it apart from other open-source FE codes
 
 | | gfem | typical open-source FE |

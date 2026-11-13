@@ -1,0 +1,147 @@
+{
+ "version": 2,
+ "name": "Rubber pad 30% compression (NLGEOM)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "cylinder",
+    "name": "Rubber pad",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 0,
+    "dy": 0,
+    "dz": 20,
+    "r": 15
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Rubber (Neo-Hookean)",
+   "model": "neohooke",
+   "color": "#444444",
+   "E": 3.0,
+   "nu": 0.49,
+   "density": 1.1e-09,
+   "alpha": 0.0002,
+   "k": 0.15,
+   "cp": 1900000000.0,
+   "yield": 0.0,
+   "tangent": 0.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     -2.3160092400488112e-15,
+     -1.938225984927759e-17,
+     9.999999999999998
+    ],
+    "size": 14137.166941154072
+   }
+  }
+ },
+ "mesh": {
+  "size": 3.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "static",
+  "nlgeom": true,
+  "substeps": 5,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     3
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       -6.028167951011828e-16,
+       0.0
+      ],
+      "size": 706.8583470577036,
+      "type": "Plane"
+     }
+    ]
+   }
+  },
+  {
+   "id": "B2",
+   "type": "displacement",
+   "name": "Compression",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     2
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       -6.028167951011828e-16,
+       20.0
+      ],
+      "size": 706.8583470577036,
+      "type": "Plane"
+     }
+    ]
+   },
+   "components": [
+    0.0,
+    0.0,
+    -6.0
+   ]
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  }
+ ]
+}

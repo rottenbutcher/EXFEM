@@ -5,3 +5,4 @@ out*/
 *.vtu
 *.pvd
 .pytest_cache/
+examples/out/

@@ -1,0 +1,355 @@
+{
+ "version": 2,
+ "name": "Stiffened panel buckling (shell + beam)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "surface",
+    "name": "Skin",
+    "plane": "XY",
+    "loops": [
+     {
+      "rect": [
+       0,
+       0,
+       300,
+       200
+      ]
+     }
+    ]
+   },
+   {
+    "id": "F2",
+    "type": "line",
+    "name": "Stringer 1",
+    "points": [
+     [
+      0,
+      66.67,
+      0
+     ],
+     [
+      300,
+      66.67,
+      0
+     ]
+    ]
+   },
+   {
+    "id": "F3",
+    "type": "line",
+    "name": "Stringer 2",
+    "points": [
+     [
+      0,
+      133.33,
+      0
+     ],
+     [
+      300,
+      133.33,
+      0
+     ]
+    ]
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Aluminum Alloy",
+   "model": "linear",
+   "color": "#c4cbd4",
+   "E": 71000.0,
+   "nu": 0.33,
+   "density": 2.7699999999999997e-09,
+   "alpha": 2.3e-05,
+   "k": 144.0,
+   "cp": 875000000.0,
+   "yield": 280.0,
+   "tangent": 500.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "S1": {
+   "name": "Skin",
+   "material": "M1",
+   "thickness": 2.0,
+   "sig": {
+    "com": [
+     150.0,
+     33.335,
+     0.0
+    ],
+    "size": 20001.0,
+    "type": "Plane"
+   }
+  },
+  "S2": {
+   "name": "Skin",
+   "material": "M1",
+   "thickness": 2.0,
+   "sig": {
+    "com": [
+     150.0,
+     100.0,
+     0.0
+    ],
+    "size": 19998.000000000004,
+    "type": "Plane"
+   }
+  },
+  "S3": {
+   "name": "Skin",
+   "material": "M1",
+   "thickness": 2.0,
+   "sig": {
+    "com": [
+     150.0,
+     166.66500000000002,
+     0.0
+    ],
+    "size": 20000.999999999996,
+    "type": "Plane"
+   }
+  },
+  "L5": {
+   "name": "Stringer",
+   "material": "M1",
+   "profile": "RECT",
+   "dims": [
+    3.0,
+    20.0
+   ],
+   "n1": [
+    0,
+    1,
+    0
+   ],
+   "sig": {
+    "com": [
+     150.0,
+     66.67,
+     0.0
+    ],
+    "size": 300.0
+   }
+  },
+  "L6": {
+   "name": "Stringer",
+   "material": "M1",
+   "profile": "RECT",
+   "dims": [
+    3.0,
+    20.0
+   ],
+   "n1": [
+    0,
+    1,
+    0
+   ],
+   "sig": {
+    "com": [
+     150.0,
+     133.33,
+     0.0
+    ],
+    "size": 300.0
+   }
+  }
+ },
+ "mesh": {
+  "size": 10.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "buckling",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 4,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "simply_supported",
+   "name": "Loaded edge support",
+   "scope": {
+    "dim": 1,
+    "ids": [
+     7,
+     10,
+     12
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       33.33500000000001,
+       0.0
+      ],
+      "size": 66.67000000000002
+     },
+     {
+      "com": [
+       0.0,
+       100.00000000000001,
+       0.0
+      ],
+      "size": 66.66
+     },
+     {
+      "com": [
+       0.0,
+       166.66500000000002,
+       0.0
+      ],
+      "size": 66.66999999999999
+     }
+    ]
+   }
+  },
+  {
+   "id": "B2",
+   "type": "displacement",
+   "name": "Edges w = 0",
+   "scope": {
+    "dim": 1,
+    "ids": [
+     8,
+     11,
+     14,
+     9,
+     13
+    ],
+    "sigs": [
+     {
+      "com": [
+       300.0,
+       33.335,
+       0.0
+      ],
+      "size": 66.67
+     },
+     {
+      "com": [
+       300.0,
+       100.0,
+       0.0
+      ],
+      "size": 66.66000000000001
+     },
+     {
+      "com": [
+       300.0,
+       166.66500000000002,
+       0.0
+      ],
+      "size": 66.66999999999999
+     },
+     {
+      "com": [
+       150.0,
+       0.0,
+       0.0
+      ],
+      "size": 300.0
+     },
+     {
+      "com": [
+       150.0,
+       200.0,
+       0.0
+      ],
+      "size": 300.0
+     }
+    ]
+   },
+   "components": [
+    null,
+    null,
+    0.0
+   ]
+  },
+  {
+   "id": "L1",
+   "type": "force",
+   "name": "Compression",
+   "scope": {
+    "dim": 1,
+    "ids": [
+     8,
+     11,
+     14
+    ],
+    "sigs": [
+     {
+      "com": [
+       300.0,
+       33.335,
+       0.0
+      ],
+      "size": 66.67
+     },
+     {
+      "com": [
+       300.0,
+       100.0,
+       0.0
+      ],
+      "size": 66.66000000000001
+     },
+     {
+      "com": [
+       300.0,
+       166.66500000000002,
+       0.0
+      ],
+      "size": 66.66999999999999
+     }
+    ]
+   },
+   "vector": [
+    -1000.0,
+    0,
+    0
+   ]
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  }
+ ]
+}

@@ -175,7 +175,8 @@ def extract_spec(g, log=None, names=None, physical=False, beam_curves=None):
             allx = np.concatenate(idxs)
             sp.surfaces[f"FACE_{tag}"] = dict(elems=allx, faces=np.zeros(len(allx), np.int64))
     for dim, tag in g.model.getEntities(1):
-        if tag in fe and not (beam_curves and tag in beam_curves):
+        on_face = tag in fe or len(g.model.getAdjacencies(1, tag)[0]) > 0
+        if on_face and not (beam_curves and tag in beam_curves):
             continue
         et_list, _, en_list = g.model.mesh.getElements(1, tag)
         for et, en in zip(et_list, en_list):
