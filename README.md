@@ -28,15 +28,54 @@ gfem is an open-source structural/thermal finite element package written in Pyth
    results. Because it runs in a browser, the solver can sit on a remote GPU node while you work
    from a laptop.
 
+Install (CPU: jax, scipy, gmsh/OpenCASCADE, pyamg, ezdxf, meshio):
+
 ```bash
-pip install -e ".[all]"            # CPU: jax, scipy, gmsh (OpenCASCADE), pyamg, ezdxf, meshio
-pip install "jax[cuda12]"          # NVIDIA GPU (no code change); AMD: jax[rocm]
-gfem gui                           # GUI at http://127.0.0.1:8765
-gfem gui --host 0.0.0.0            # serve the GUI from a GPU workstation / cloud node
-gfem run job.inp                   # Abaqus deck  (also .bdf/.nas Nastran, .cdb ANSYS)
-gfem convert job.inp job.bdf       # Abaqus <-> Nastran through the neutral model
+pip install -e ".[all]"
+```
+
+NVIDIA GPU (no code change):
+
+```bash
+pip install "jax[cuda12]"
+```
+
+Start the GUI, then open http://127.0.0.1:8765 in a browser:
+
+```bash
+gfem gui
+```
+
+If the `gfem` command is not found (Scripts folder not on PATH), use:
+
+```bash
+python -m gfem gui
+```
+
+Serve the GUI from a GPU workstation / cloud node:
+
+```bash
+gfem gui --host 0.0.0.0
+```
+
+Run a solver deck (Abaqus `.inp`, Nastran `.bdf/.nas`, ANSYS `.cdb`):
+
+```bash
+gfem run job.inp
+```
+
+Convert decks, mesh a CAD file, run the tests:
+
+```bash
+gfem convert job.inp job.bdf
+```
+
+```bash
 gfem mesh part.step -o part.inp --size 3
-python -m pytest tests             # 72 verification tests against analytical solutions
+```
+
+```bash
+python -m pytest tests
 ```
 
 | | |

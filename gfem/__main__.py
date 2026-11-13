@@ -13,6 +13,8 @@ import sys
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "#" in argv or any(a.startswith("#") for a in argv):   # a pasted README comment (cmd/PowerShell)
+        argv = argv[:next(i for i, a in enumerate(argv) if a.startswith("#"))]
     if argv and argv[0].lower().endswith((".inp", ".bdf", ".nas", ".dat", ".cdb")):
         argv = ["run"] + argv                     # backwards compatible: python -m gfem job.inp
     p = argparse.ArgumentParser(prog="gfem", description="GPU nonlinear FEM")
