@@ -106,6 +106,10 @@ def mesh_cad(cad, size=None, size_min=None, order=2, kind="tet", curvature=8, lo
                     pass
         elif kind == "hexdom":
             g.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
+        vb = {abs(t) for v in g.model.getEntities(3) for _, t in g.model.getBoundary([v], oriented=False)}
+        for _, ftag in g.model.getEntities(2):
+            if ftag not in vb and kind != "tri_shell":         # sheets: quad-dominant shell mesh
+                g.model.mesh.setRecombine(2, ftag)
         g.model.mesh.generate(3)
         if order == 2:
             g.model.mesh.setOrder(2)
@@ -114,10 +118,10 @@ def mesh_cad(cad, size=None, size_min=None, order=2, kind="tet", curvature=8, lo
                 g.model.mesh.optimize("Netgen")
             except Exception:   # noqa: BLE001
                 pass
-        return extract_spec(g, log=log, names=None)
+        return extract_spec(g, log=log, names=None, beam_curves={l["id"] for l in info.get("lines", [])})
 
 
-def extract_spec(g, log=None, names=None, physical=False):
+def extract_spec(g, log=None, names=None, physical=False, beam_curves=None):
     """Build a Spec from the current gmsh mesh with entity-based sets."""
     nt, nc, _ = g.model.mesh.getNodes()
     order = np.argsort(nt)
@@ -152,6 +156,33 @@ def extract_spec(g, log=None, names=None, physical=False):
                     face_keys.setdefault(key, (e, k))
         nodes_b, _, _ = g.model.mesh.getNodes(3, tag, includeBoundary=True)
         sp.nsets[f"BODY_{tag}"] = lookup[np.asarray(nodes_b, np.int64)]
+    # ---- sheets (faces not bounding a volume) -> shells, free curves -> beams
+    vb = {abs(t) for v in g.model.getEntities(3) for _, t in g.model.getBoundary([v], oriented=False)}
+    fe = {abs(t) for _, f in g.model.getEntities(2) for _, t in g.model.getBoundary([(2, f)], oriented=False)}
+    for dim, tag in g.model.getEntities(2):
+        if tag in vb:
+            continue
+        et_list, _, en_list = g.model.mesh.getElements(2, tag)
+        idxs = []
+        for et, en in zip(et_list, en_list):
+            nn = {2: 3, 9: 6, 3: 4, 16: 8, 10: 9}.get(et)
+            if nn is None:
+                continue
+            ncr = 3 if et in (2, 9) else 4
+            conn = lookup[np.asarray(en, np.int64).reshape(-1, nn)[:, :ncr]]
+            idxs.append(sp.add_elements("S3" if ncr == 3 else "S4", conn, elset=f"SHEET_{tag}"))
+        if idxs:
+            allx = np.concatenate(idxs)
+            sp.surfaces[f"FACE_{tag}"] = dict(elems=allx, faces=np.zeros(len(allx), np.int64))
+    for dim, tag in g.model.getEntities(1):
+        if tag in fe and not (beam_curves and tag in beam_curves):
+            continue
+        et_list, _, en_list = g.model.mesh.getElements(1, tag)
+        for et, en in zip(et_list, en_list):
+            nn = {1: 2, 8: 3, 26: 4}.get(et)
+            if nn:
+                conn = lookup[np.asarray(en, np.int64).reshape(-1, nn)[:, :2]]
+                sp.add_elements("B31", conn, elset=f"LINE_{tag}")
     for dim, tag in g.model.getEntities(2):
         nodes_f, _, _ = g.model.mesh.getNodes(2, tag, includeBoundary=True)
         sp.nsets[f"FACE_{tag}"] = np.unique(lookup[np.asarray(nodes_f, np.int64)])
@@ -191,6 +222,7 @@ def extract_spec(g, log=None, names=None, physical=False):
                 if ss:
                     sp.surfaces[name.upper()] = dict(elems=np.concatenate([s["elems"] for s in ss]),
                                                      faces=np.concatenate([s["faces"] for s in ss]))
+    _compact(sp)
     # quality: scaled Jacobian / SICN statistics
     stats = dict(nodes=len(X), elements=sp.nelem)
     try:
@@ -211,6 +243,25 @@ def extract_spec(g, log=None, names=None, physical=False):
         cnt[gr.etype] += len(gr.conn)
     stats["types"] = dict(cnt)
     return sp, stats
+
+
+def _compact(sp):
+    """Drop nodes that no element references (mid-edge nodes of shells/beams in a quadratic
+    mesh) and renumber everything."""
+    used = np.zeros(len(sp.nodes), bool)
+    for g in sp.groups:
+        used[g.conn.ravel()] = True
+    if used.all():
+        return
+    new = -np.ones(len(sp.nodes), np.int64)
+    new[used] = np.arange(used.sum())
+    sp.nodes = sp.nodes[used]
+    sp.node_ids = np.arange(1, used.sum() + 1)
+    for g in sp.groups:
+        g.conn = new[g.conn]
+    for k, v in list(sp.nsets.items()):
+        v = new[np.asarray(v, np.int64)]
+        sp.nsets[k] = v[v >= 0]
 
 
 def read_mesh_file(path):

@@ -12,7 +12,7 @@ export function openSketcher(app, existing) {
   const $ = s => dlg.querySelector(s);
   $("#sk-plane").value = typeof existing?.plane === "string" ? existing.plane : "XY";
   $("#sk-offset").value = existing?.offset ?? 0;
-  $("#sk-op").value = existing?.type === "revolve" ? "revolve" : "extrude";
+  $("#sk-op").value = existing?.type === "revolve" ? "revolve" : existing?.type === "surface" ? "surface" : "extrude";
   $("#sk-dist").value = existing?.distance ?? 20;
   $("#sk-angle").value = existing?.angle ?? 360;
   $("#sk-sym").checked = !!existing?.symmetric;
@@ -163,6 +163,7 @@ export function openSketcher(app, existing) {
     const op = $("#sk-op").value;
     const f = { type: op, plane: $("#sk-plane").value, offset: +$("#sk-offset").value || 0, loops: st.loops };
     if (op === "extrude") { f.distance = +$("#sk-dist").value || 10; f.symmetric = $("#sk-sym").checked; }
+    else if (op === "surface") { /* planar sheet body for a shell mesh */ }
     else { f.angle = +$("#sk-angle").value || 360; f.axis = $("#sk-axis").value === "x" ? [[0, 0], [1, 0]] : [[0, 0], [0, 1]]; }
     app.addSketchFeature(f, existing, $("#sk-bool").value, bodySel.value);
   };

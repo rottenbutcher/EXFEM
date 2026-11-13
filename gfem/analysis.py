@@ -139,7 +139,7 @@ def build(spec, log=print):
         if c.get("auto_slave", True) and len(sl) and len(ms) and sl.char_length(X) > ms.char_length(X):
             ms, sl = sl, ms                         # the finer mesh becomes the slave
         slave = sl if len(sl) else getattr(sl, "node_only", None)
-        model.add_interaction(PenaltyContact(X, ms, slave, E=Emod, fkn=c.get("fkn", 1.0),
+        model.add_interaction(PenaltyContact(X, ms, slave, E=Emod, fkn=c.get("fkn", 1.0), mu=c.get("mu", 0.0),
                                              augmented=c.get("augmented", True), name=c.get("name", "contact")))
     plan = [_build_step(model, spec, s, elem_block) for s in spec.steps]
     return model, plan
@@ -223,7 +223,8 @@ def _build_step(model, spec, s, elem_block):
                   pressures=pressures, dloads=dl, temperature=temp, nmodes=s.get("nmodes", 10),
                   riks=s.get("riks", {}), frames=s.get("frames", 20), damping=s.get("damping", 0.0),
                   alpha=s.get("alpha", -0.05), dt=s.get("dt"), mass_scaling=s.get("mass_scaling"),
-                  output_every=s.get("output_every", 1), nlgeom=s.get("nlgeom"))
+                  output_every=s.get("output_every", 1), nlgeom=s.get("nlgeom"),
+                  eigensolver=s.get("eigensolver", "auto"))
     step.spec = s
     step.temp_explicit = bool(s["temperatures"])
     step.bolts = []
@@ -412,6 +413,23 @@ def run_spec(spec, outdir=".", base="job", verbose=True, monitor=None, write=Tru
             u, s, info = S.DynamicSolver(model, monitor=rec, linear_solver=opts["linear_solver"]).solve(step, state=state)
         elif kind == "explicit":
             S.ExplicitSolver(model, monitor=rec).solve(step, state=state)
+        elif kind == "postbuckling":
+            im = sp.get("imperfection", {})
+            info = S.postbuckling(model, step, modes=tuple(im.get("modes", [1])), scale=im.get("scale"),
+                                  monitor=rec, linear_solver=opts["linear_solver"])
+            rec.frame(float(info["lpf"]), info["u"], model.init_state(), step=step.name, lpf=float(info["lpf"]))
+        elif kind == "harmonic":
+            h = sp.get("harmonic", {})
+            fr = np.linspace(h.get("fmin", 1.0), h.get("fmax", 1000.0), h.get("nfreq", 200))
+            info = S.harmonic(model, step, fr, damping=h.get("damping", 0.02), nmodes=max(step.nmodes, 20), monitor=rec)
+            amp = np.abs(info["U"]).reshape(len(fr), -1, 3)
+            kmax = int(np.argmax(amp.max(axis=(1, 2))))
+            info["peak_freq"] = float(fr[kmax])
+            nr = getattr(model, "n_real", model.nn)
+            info["response"] = np.stack([fr, amp[:, :nr].max(axis=(1, 2))], 1)
+            rec.frame(float(fr[kmax]), np.real(info["U"][kmax]) * 0 + amp[kmax].ravel(), model.init_state(),
+                      step=step.name, freq=float(fr[kmax]))
+            info.pop("U")
         elif kind == "frequency":
             info = S.modal(model, step, state, monitor=rec)
         elif kind == "buckle":

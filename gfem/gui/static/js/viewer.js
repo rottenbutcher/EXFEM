@@ -217,6 +217,13 @@ export class Viewer {
     this.meshLines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x1b2b40, transparent: true, opacity: 0.55, clippingPlanes: [this.clip] }));
     this.meshLines.visible = this.showMeshLines;
     this.groups.mesh.add(this.meshLines);
+    const bl = m.linesA || (m.linesA = m.lines ? b64i32(m.lines) : new Int32Array(0));
+    if (bl.length) {
+      const bg = new THREE.BufferGeometry(); bg.setAttribute("position", new THREE.BufferAttribute(xyz, 3)); bg.setIndex(new THREE.BufferAttribute(new Uint32Array(bl), 1));
+      this.groups.mesh.add(new THREE.LineSegments(bg, new THREE.LineBasicMaterial({ color: 0xd35400, clippingPlanes: [this.clip] })));
+      const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(xyz, 3)); pg.setIndex(new THREE.BufferAttribute(new Uint32Array(bl), 1));
+      this.groups.mesh.add(new THREE.Points(pg, new THREE.PointsMaterial({ color: 0x5d2a00, size: 4, sizeAttenuation: false })));
+    }
     if (!this.bbox) { g.computeBoundingBox(); this.bbox = g.boundingBox.clone(); this.radius = g.boundingSphere.radius; this.fit(); }
   }
 
@@ -255,6 +262,14 @@ export class Viewer {
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: [this.clip] });
     if (!r.values) { mat.fragmentShader = contourFS.replace("vec3 c = texture2D(cmap, vec2(tb, 0.5)).rgb;", "vec3 c = vec3(0.62,0.72,0.82);"); }
     this.resMesh = new THREE.Mesh(g, mat); this.groups.result.add(this.resMesh);
+    const bl = m.linesA || new Int32Array(0);
+    if (bl.length) {                       // beams: contour-coloured lines
+      const lg2 = new THREE.BufferGeometry();
+      lg2.setAttribute("position", new THREE.BufferAttribute(m.xyzA, 3)); lg2.setIndex(new THREE.BufferAttribute(new Uint32Array(bl), 1));
+      lg2.setAttribute("scalar", g.attributes.scalar); lg2.setAttribute("disp", g.attributes.disp);
+      lg2.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(m.xyzA.length).fill(1), 3));
+      this.resBeams = new THREE.LineSegments(lg2, mat); this.groups.result.add(this.resBeams);
+    } else this.resBeams = null;
     // deformed wire (element edges) and undeformed outline
     const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(m.xyzA), 3));
     lg.setIndex(new THREE.BufferAttribute(new Uint32Array(m.edA), 1));

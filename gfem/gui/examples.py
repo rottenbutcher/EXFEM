@@ -168,7 +168,53 @@ def ex_rubber():
     return p
 
 
+def ex_stiffened_panel():
+    feats = [dict(id="F1", type="surface", name="Skin", plane="XY", loops=[dict(rect=[0, 0, 300, 200])]),
+             dict(id="F2", type="line", name="Stringer 1", points=[[0, 66.67, 0], [300, 66.67, 0]]),
+             dict(id="F3", type="line", name="Stringer 2", points=[[0, 133.33, 0], [300, 133.33, 0]])]
+    p, info = _base("Stiffened panel buckling (shell + beam)", feats, analysis="buckling",
+                    material="Aluminum Alloy", mesh_size=10.0)
+    for b in info.get("sheets", []):
+        p["bodies"]["S" + str(b["id"])] = dict(name="Skin", material="M1", thickness=2.0, sig=b["sig"])
+    for b in info.get("lines", []):
+        p["bodies"]["L" + str(b["id"])] = dict(name="Stringer", material="M1", profile="RECT", dims=[3.0, 20.0],
+                                                n1=[0, 1, 0], sig=b["sig"])
+    E_ = lambda pred: [e for e in info["edges"] if pred(np.asarray(e["com"])) and not e.get("free")]
+    left = E_(lambda c: abs(c[0]) < 1e-6)
+    right = E_(lambda c: abs(c[0] - 300) < 1e-6)
+    sides = E_(lambda c: abs(c[1]) < 1e-6 or abs(c[1] - 200) < 1e-6)
+    sc = lambda es: dict(dim=1, ids=[e["id"] for e in es], sigs=[e["sig"] for e in es])
+    p["conditions"] = [
+        dict(id="B1", type="simply_supported", name="Loaded edge support", scope=sc(left)),
+        dict(id="B2", type="displacement", name="Edges w = 0", scope=sc(right + sides), components=[None, None, 0.0]),
+        dict(id="L1", type="force", name="Compression", scope=sc(right), vector=[-1000.0, 0, 0]),
+    ]
+    p["analysis"]["nmodes"] = 4
+    return p
+
+
+def ex_frame():
+    pts = lambda *a: [list(map(float, x)) for x in a]
+    feats = [dict(id="F1", type="line", name="Columns + beams",
+                  points=pts([0, 0, 0], [0, 0, 3000], [4000, 0, 3000], [4000, 0, 0])),
+             dict(id="F2", type="line", name="Frame 2", points=pts([0, 3000, 0], [0, 3000, 3000], [4000, 3000, 3000], [4000, 3000, 0])),
+             dict(id="F3", type="line", name="Tie 1", points=pts([0, 0, 3000], [0, 3000, 3000])),
+             dict(id="F4", type="line", name="Tie 2", points=pts([4000, 0, 3000], [4000, 3000, 3000]))]
+    p, info = _base("3D steel frame (beams)", feats, analysis="modal", mesh_size=250.0)
+    for b in info.get("lines", []):
+        p["bodies"]["L" + str(b["id"])] = dict(name=f"Member {b['id']}", material="M1", profile="I",
+                                                dims=[300.0, 150.0, 10.0, 7.0], sig=b["sig"])
+    feet = [v for v in info["vertices"] if abs(v["xyz"][2]) < 1e-6]
+    p["conditions"] = [dict(id="B1", type="fixed", name="Column bases", scope=dict(dim=0, ids=[v["id"] for v in feet],
+                                                                              sigs=[v["sig"] for v in feet]))]
+    p["analysis"]["nmodes"] = 6
+    p["results"] = [dict(id="R1", type="total_deformation", name="Mode shape")]
+    return p
+
+
 EXAMPLES = {
+    "panel": ("Stiffened panel (shell + beam)", "MITC4 shell skin with Timoshenko stringers, eigen buckling.", ex_stiffened_panel),
+    "frame": ("3D steel frame (beams)", "I-section beam frame, natural frequencies.", ex_frame),
     "bracket": ("L-Bracket (static)", "Sketch-extruded bracket with bolt holes; fixed holes, pin load.", ex_bracket),
     "plate_hole": ("Plate with hole", "Stress concentration with symmetry, local mesh sizing.", ex_plate_hole),
     "modal": ("Cantilever modal", "Natural frequencies and effective mass of an aluminium beam.", ex_modal),

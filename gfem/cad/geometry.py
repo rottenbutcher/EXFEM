@@ -269,21 +269,27 @@ class CadModel:
                 try:
                     out = self._feature(g, f, bodies)
                 except Exception as e:      # noqa: BLE001
-                    raise GeometryError(f"feature '{f.get('name', fid)}' ({f.get('type')}): {e}")
+                    raise GeometryError(f"feature '{f.get('name', fid)}' ({f.get('type')}): {e}")  # noqa
                 if out is not None:
                     bodies[fid] = out
-            owner = {tag: fid for fid, lst in bodies.items() for d, tag in lst if d == 3}
+            owner = {(d, tag): fid for fid, lst in bodies.items() for d, tag in lst}
             if not self.stl_mode:
                 occ.synchronize()
-                vols = g.model.getEntities(3)
+                # top-level entities: volumes, free sheets (faces not bounding a volume), free curves
+                vols = list(g.model.getEntities(3))
+                bounded = {abs(t) for v in vols for _, t in g.model.getBoundary([v], oriented=False)}
+                sheets = [(2, t) for _, t in g.model.getEntities(2) if t not in bounded]
+                on_face = {abs(t) for _, f in g.model.getEntities(2) for _, t in g.model.getBoundary([(2, f)], oriented=False)}
+                curves = [(1, t) for _, t in g.model.getEntities(1) if t not in on_face]
+                vols = vols + sheets + curves
                 if self.share_topology and len(vols) > 1:
                     try:
                         _, omap = occ.fragment(vols[:1], vols[1:])
                         new_owner = {}
                         for (d, old), outs in zip(vols, omap):
                             for d2, t2 in outs:
-                                if d2 == 3 and old in owner:
-                                    new_owner.setdefault(t2, owner[old])
+                                if d2 == d and (d, old) in owner:
+                                    new_owner.setdefault((d2, t2), owner[(d, old)])
                         owner = new_owner
                         occ.synchronize()
                     except Exception as e:   # noqa: BLE001
@@ -365,6 +371,17 @@ class CadModel:
                     occ.translate([(2, surf)], *(-ez * dist / 2))
                 out = occ.extrude([(2, surf)], *(ez * dist))
             return [x for x in out if x[0] == 3]
+        if t == "surface":                     # planar sheet body from a sketch (shell mesh)
+            frame = plane_frame(f.get("plane", "XY"))
+            if f.get("offset"):
+                o, ex, ey, ez = frame
+                frame = (o + ez * float(f["offset"]), ex, ey, ez)
+            return [(2, _Builder(g, frame).face(sort_loops(f["loops"])))]
+        if t == "line":                        # polyline wire body (beam mesh)
+            pts = [occ.addPoint(*map(float, p)) for p in f["points"]]
+            if f.get("closed"):
+                pts.append(pts[0])
+            return [(1, occ.addLine(a, b)) for a, b in zip(pts[:-1], pts[1:])]
         if t == "boolean":
             op = f.get("op", "fuse")
             obj = self._ids_to_tags(bodies, f["target"])
@@ -481,12 +498,13 @@ class CadModel:
         vols = [x for x in out if x[0] == 3]
         if not vols:
             surf = [x for x in out if x[0] == 2]
-            if surf:                         # sheet bodies: try to sew into a solid
-                try:
-                    sl = occ.addSurfaceLoop([s[1] for s in surf], sewing=True)
-                    vols = [(3, occ.addVolume([sl]))]
-                except Exception:            # noqa: BLE001
-                    raise GeometryError("file contains surfaces only (no closed solid)")
+            if surf and f.get("sew", False):     # optionally close sheets into a solid
+                sl = occ.addSurfaceLoop([s[1] for s in surf], sewing=True)
+                vols = [(3, occ.addVolume([sl]))]
+            else:                                # keep as sheet bodies (shell mesh) / wires (beams)
+                vols = surf or [x for x in out if x[0] == 1]
+                if not vols:
+                    raise GeometryError("file contains no solids, surfaces or curves")
         if f.get("scale") and float(f["scale"]) != 1.0:
             s = float(f["scale"])
             occ.dilate(vols, 0, 0, 0, s, s, s)
@@ -507,7 +525,7 @@ class CadModel:
             faces = [abs(s) for _, s in g.model.getBoundary([(3, tag)], oriented=False)]
             info["bodies"].append(dict(id=tag, volume=vol, com=com, bbox=list(bb), faces=faces,
                                        sig=dict(com=com, size=vol),
-                                       feature=getattr(self, "_owner", {}).get(tag)))
+                                       feature=getattr(self, "_owner", {}).get((3, tag))))
         for dim, tag in g.model.getEntities(2):
             area = g.model.occ.getMass(2, tag) if occ_ok else 0.0
             com = list(g.model.occ.getCenterOfMass(2, tag)) if occ_ok else list(np.mean(
@@ -532,6 +550,26 @@ class CadModel:
         for dim, tag in g.model.getEntities(0):
             xyz = g.model.getValue(0, tag, [])
             info["vertices"].append(dict(id=tag, xyz=list(xyz), sig=dict(com=list(xyz), size=0.0)))
+        vol_faces = {abs(t) for b in info["bodies"] for t in b["faces"]}
+        face_edges = set()
+        for fdict in info["faces"]:
+            if fdict["id"] not in vol_faces:
+                fdict["sheet"] = True
+                info.setdefault("sheets", []).append(dict(id=fdict["id"], area=fdict["area"], com=fdict["com"],
+                                                          sig=fdict["sig"], feature=getattr(self, "_owner", {}).get((2, fdict["id"]))))
+            for _, e in g.model.getBoundary([(2, fdict["id"])], oriented=False):
+                face_edges.add(abs(e))
+        line_owned = {t for (d, t) in getattr(self, "_owner", {}) if d == 1}
+        for e in info["edges"]:
+            if e["id"] not in face_edges or e["id"] in line_owned:
+                e["free"] = True
+                info.setdefault("lines", []).append(dict(id=e["id"], length=e["length"], com=e["com"], sig=e["sig"],
+                                                         feature=getattr(self, "_owner", {}).get((1, e["id"]))))
+        info.setdefault("sheets", [])
+        info.setdefault("lines", [])
+        for dd, tag in [(2, x["id"]) for x in info["sheets"]] + [(1, x["id"]) for x in info["lines"]]:
+            bb = g.model.getBoundingBox(dd, tag)
+            bbmin, bbmax = np.minimum(bbmin, bb[:3]), np.maximum(bbmax, bb[3:])
         if np.all(np.isfinite(bbmin)):
             info["bbox"] = list(bbmin) + list(bbmax)
             info["diag"] = float(np.linalg.norm(bbmax - bbmin))

@@ -18,7 +18,7 @@ const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const uid = (p, list) => { let n = 1; const ids = new Set(list.map(x => x.id)); while (ids.has(p + n)) n++; return p + n; };
 
-const FEATURE_LABEL = { box: "Box", cylinder: "Cylinder", sphere: "Sphere", cone: "Cone", torus: "Torus", wedge: "Wedge", extrude: "Extrude",
+const FEATURE_LABEL = { surface: "Surface", line: "Line", box: "Box", cylinder: "Cylinder", sphere: "Sphere", cone: "Cone", torus: "Torus", wedge: "Wedge", extrude: "Extrude",
   revolve: "Revolve", dxf_extrude: "DXF Extrude", boolean: "Boolean", fillet: "Fillet", chamfer: "Chamfer", transform: "Transform", pattern: "Pattern", import: "Import" };
 const ICON = {
   model: "▣", geometry: "◈", feature: "▸", body: "■", materials: "◉", material: "●", connections: "⇄", contact: "⇄", named: "☰", ns: "▤",
@@ -361,7 +361,8 @@ class App {
         G("Workflow", B("geom", "Geometry", "◈") + B("mesh", "Mesh", "▦") + B("solve", "Solve", "⚡", "Solve (F5)") + B("results", "Results", "◐")) +
         G("Units", `<select id="rb-units" class="rbsel"><option value="mm">mm · N · s · MPa · t</option><option value="m">m · N · s · Pa · kg (SI)</option></select>`),
       geometry: G("Primitives", B("f-box", "Box", "⬛") + B("f-cylinder", "Cylinder", "⬤") + B("f-sphere", "Sphere", "●") + B("f-cone", "Cone", "▲") + B("f-torus", "Torus", "◯")) +
-        G("Sketch", B("sketch", "Sketch…", "✎", "2D sketch → extrude / revolve") + B("import-dxf", "DXF", "⌗", "Extrude a DXF drawing")) +
+        G("Sketch", B("sketch", "Sketch…", "✎", "2D sketch → extrude / revolve / surface") + B("import-dxf", "DXF", "⌗", "Extrude a DXF drawing")) +
+        G("Thin structures", B("f-surface", "Surface", "▱", "Planar surface body (shell, from a sketch)") + B("f-line", "Line", "╱", "Line body (beam) from points")) +
         G("Operations", B("f-union", "Union", "∪", "Fuse selected bodies") + B("f-subtract", "Subtract", "∖", "First selected body minus the others") + B("f-intersect", "Intersect", "∩") +
           B("f-fillet", "Fillet", "◜", "Fillet selected edges (edge filter)") + B("f-chamfer", "Chamfer", "◸") ) +
         G("Transform", B("f-move", "Move", "✥") + B("f-rotate", "Rotate", "⟳") + B("f-mirror", "Mirror", "⇋") + B("f-pattern", "Pattern", "⁘")) +
@@ -372,11 +373,12 @@ class App {
         G("Defaults", `<label>Size <input type="number" id="rb-msize" step="any" placeholder="auto" value="${this.project?.mesh.size ?? ""}"></label>
           <label>Order <select id="rb-morder"><option value="2">Quadratic</option><option value="1">Linear</option></select></label>
           <label>Method <select id="rb-mkind"><option value="tet">Tetrahedrons</option><option value="hex">Hex (sweepable)</option><option value="hexdom">Hex dominant</option></select></label>`),
-      setup: G("Supports", B("c-fixed", "Fixed", "▼") + B("c-displacement", "Displacement", "↧") + B("c-frictionless", "Frictionless", "⊥") + B("c-rigid_wall", "Rigid wall", "▬")) +
+      setup: G("Supports", B("c-fixed", "Fixed", "▼") + B("c-displacement", "Displacement", "↧") + B("c-frictionless", "Frictionless", "⊥") + B("c-simply_supported", "Simple sup.", "△") + B("c-remote_displacement", "Remote disp.", "⊙") + B("c-rigid_wall", "Rigid wall", "▬")) +
+        G("Connectors", B("c-remote_force", "Remote force", "⊕") + B("c-bolt_pretension", "Bolt preten.", "⚲")) +
         G("Loads", B("c-force", "Force", "➜") + B("c-pressure", "Pressure", "⇶") + B("c-moment", "Moment", "↻") + B("c-gravity", "Gravity", "⇓") +
           B("c-acceleration", "Accel.", "⇟") + B("c-rotational_velocity", "Rotation", "⟲") + B("c-body_temperature", "Thermal", "🌡")) +
         G("Thermal", B("c-temperature", "Temperature", "T") + B("c-heat_flux", "Heat flux", "q") + B("c-convection", "Convection", "h") + B("c-heat_generation", "Heat gen.", "Q")) +
-        G("Connections", B("k-bonded", "Bonded", "⇄") + B("k-frictionless", "Frictionless", "⇆") + B("k-detect", "Detect", "⌖", "Detect contacting faces between bodies")) +
+        G("Connections", B("k-bonded", "Bonded", "⇄") + B("k-frictionless", "Frictionless", "⇆") + B("k-frictional", "Frictional", "≋") + B("k-detect", "Detect", "⌖", "Detect contacting faces between bodies")) +
         G("Selection", B("ns-create", "Named sel.", "☰", "Create a named selection from the current selection")),
       solve: G("Analysis", `<select id="rb-atype" class="rbsel">${Object.entries(this.state?.analyses || {}).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>`) +
         G("Run", B("solve", "Solve", "⚡", "Solve (F5)") + B("stop", "Stop", "■")) +
@@ -465,9 +467,9 @@ class App {
       const it = { id: uid("S", p.mesh.local), name: "Sizing", scope: sc, size: s((p.mesh.size || diag / 20) / 3) };
       p.mesh.local.push(it); this.meshChanged(); return this.select({ kind: "sizing", id: it.id });
     }
-    if (a === "k-bonded" || a === "k-frictionless") {
+    if (a === "k-bonded" || a === "k-frictionless" || a === "k-frictional") {
       const sc = this.selectionScope();
-      const c = { id: uid("C", p.connections), type: a.slice(2), name: a === "k-bonded" ? "Bonded" : "Frictionless", master: sc, slave: null, fkn: 1.0 };
+      const c = { id: uid("C", p.connections), type: a.slice(2), name: { "k-bonded": "Bonded", "k-frictionless": "Frictionless", "k-frictional": "Frictional" }[a], master: sc, slave: null, fkn: 1.0, mu: 0.2 };
       p.connections.push(c); this.push(); this.log("Contact created: select the target faces with 'Apply' in Details if needed.");
       return this.select({ kind: "contact", id: c.id });
     }
@@ -526,6 +528,8 @@ class App {
     if (kind === "sphere") f = { type: "sphere", x: ox, y: 0, z: 0, r: s(L / 2) };
     if (kind === "cone") f = { type: "cone", x: ox, y: 0, z: 0, dx: 0, dy: 0, dz: L, r1: s(L / 3), r2: 0 };
     if (kind === "torus") f = { type: "torus", x: ox, y: 0, z: 0, r1: s(L / 2), r2: s(L / 8) };
+    if (kind === "surface") f = { type: "surface", plane: "XY", offset: 0, loops: [{ rect: [ox, 0, ox + L, L] }] };
+    if (kind === "line") f = { type: "line", points: [[ox, 0, 0], [ox + L, 0, 0]] };
     if (["union", "subtract", "intersect"].includes(kind)) {
       const sel = this.viewer.selection;
       let ids = sel.dim === 3 ? [...sel.ids] : [];
@@ -564,7 +568,7 @@ class App {
   async addSketchFeature(f, existing, boolOp, target) {
     const p = this.project, F = p.geometry.features;
     if (existing) { Object.assign(existing, f); await this.regenerate(); return this.select({ kind: "feature", id: existing.id }); }
-    f.id = uid("F", F); f.name = `${f.type === "revolve" ? "Revolve" : "Extrude"} ${f.id.slice(1)}`; F.push(f);
+    f.id = uid("F", F); f.name = `${{ revolve: "Revolve", surface: "Surface", extrude: "Extrude" }[f.type]} ${f.id.slice(1)}`; F.push(f);
     if (boolOp !== "new" && target) {
       const b = { id: uid("F", F), type: "boolean", op: boolOp, target: [target], tool: [f.id] }; b.name = `Boolean (${boolOp}) ${b.id.slice(1)}`; F.push(b);
     }
@@ -589,6 +593,9 @@ class App {
     if (type === "heat_flux") c.value = 0.01;
     if (type === "convection") { c.h = 2e-5; c.ambient = 22; }
     if (type === "heat_generation") c.value = 1e-4;
+    if (type === "remote_displacement") { c.point = null; c.components = [0, 0, 0]; c.rotations = [0, 0, 0]; }
+    if (type === "remote_force") { c.point = null; c.vector = [0, -1000, 0]; c.moment = [0, 0, 0]; }
+    if (type === "bolt_pretension") { c.value = 10000; c.axis = null; }
     if (type === "rigid_wall") { const bb = this.geom?.info?.bbox || [0, 0, 0, 1, 1, 1]; c.point = [0, bb[4] * 1.001, 0]; c.normal = [0, -1, 0]; c.motion = [0, -0.01 * (this.geom?.info?.diag || 1), 0]; }
     if (["temperature", "heat_flux", "convection", "heat_generation"].includes(type) && !p.analysis.type.startsWith("thermal")) {
       this.log("thermal boundary condition added – switch the analysis to Steady-State Thermal or Thermal-Stress to use it", "warn");
@@ -662,7 +669,9 @@ class App {
     const stIcon = s => ({ ok: "ok", none: "todo", stale: "stale", failed: "fail", running: "run" }[s] || "");
     const condState = c => (this.state.conditions[c.type]?.dims.length && !(c.scope && (c.scope.ids?.length || c.scope.named || c.scope.set))) ? "fail" : "ok";
     const feats = p.geometry.features.map(f => ({ kind: "feature", id: f.id, label: f.name || f.id, icon: "feature", st: f.suppressed ? "sup" : "ok" }));
-    const bodies = (info?.bodies || []).map(b => { const pb = p.bodies[String(b.id)] || {}; return { kind: "body", id: String(b.id), label: pb.name || `Body ${b.id}`, icon: "body", st: pb.suppressed ? "sup" : "ok" }; });
+    const bodies = (info?.bodies || []).map(b => { const pb = p.bodies[String(b.id)] || {}; return { kind: "body", id: String(b.id), label: pb.name || `Body ${b.id}`, icon: "body", st: pb.suppressed ? "sup" : "ok" }; })
+      .concat((info?.sheets || []).map(b => { const pb = p.bodies["S" + b.id] || {}; return { kind: "body", id: "S" + b.id, label: (pb.name || `Surface body ${b.id}`) + ` (t=${pb.thickness ?? "?"})`, icon: "body", st: pb.suppressed ? "sup" : "ok" }; }))
+      .concat((info?.lines || []).map(b => { const pb = p.bodies["L" + b.id] || {}; return { kind: "body", id: "L" + b.id, label: (pb.name || `Line body ${b.id}`) + ` (${pb.profile || "RECT"})`, icon: "body", st: pb.suppressed ? "sup" : "ok" }; }));
     const anal = this.state.analyses[p.analysis.type];
     const conds = p.conditions.filter(c => this.relevant(c)).map(c => ({ kind: "condition", id: c.id, label: c.name, icon: this.state.conditions[c.type]?.group || "load", st: c.suppressed ? "sup" : condState(c) }));
     return { kind: "model", label: p.name || "Model", icon: "model", open: true, children: [
@@ -808,7 +817,7 @@ class App {
       const L = u.length;
       const fields = { box: [["x", "X"], ["y", "Y"], ["z", "Z"], ["dx", "Length X"], ["dy", "Length Y"], ["dz", "Length Z"]], cylinder: [["x", "Base X"], ["y", "Base Y"], ["z", "Base Z"], ["dx", "Axis X"], ["dy", "Axis Y"], ["dz", "Axis Z"], ["r", "Radius"], ["angle", "Angle (°)"]],
         sphere: [["x", "Center X"], ["y", "Center Y"], ["z", "Center Z"], ["r", "Radius"]], cone: [["x", "Base X"], ["y", "Base Y"], ["z", "Base Z"], ["dx", "Axis X"], ["dy", "Axis Y"], ["dz", "Axis Z"], ["r1", "Base radius"], ["r2", "Top radius"]],
-        torus: [["x", "Center X"], ["y", "Center Y"], ["z", "Center Z"], ["r1", "Major radius"], ["r2", "Minor radius"]], extrude: [["offset", "Plane offset"], ["distance", "Depth"]], revolve: [["offset", "Plane offset"], ["angle", "Angle (°)"]],
+        torus: [["x", "Center X"], ["y", "Center Y"], ["z", "Center Z"], ["r1", "Major radius"], ["r2", "Minor radius"]], surface: [["offset", "Plane offset"]], extrude: [["offset", "Plane offset"], ["distance", "Depth"]], revolve: [["offset", "Plane offset"], ["angle", "Angle (°)"]],
         dxf_extrude: [["distance", "Depth"], ["scale", "Scale"]], fillet: [["r", "Radius"]], chamfer: [["d", "Distance"]], import: [["scale", "Scale"]] }[it.type] || [];
       for (const [k, l] of fields) num(l, it, k, ["angle", "scale"].includes(k) ? "" : L);
       if (it.type === "extrude" || it.type === "revolve") { ro("Profiles", it.loops.length); rows.push({ label: "Sketch", html: `<button data-sketch="1">Edit sketch…</button>` }); if (it.type === "extrude") chk("Symmetric", it, "symmetric"); }
@@ -819,11 +828,19 @@ class App {
         if (it.op === "mirror") { vec("Point", it, "point", L); vec("Normal", it, "normal"); } if (it.op === "scale") { vec("Point", it, "point", L); num("Factor", it, "factor"); } }
       if (it.type === "pattern") { sel("Type", it, "kind", [["linear", "Linear"], ["circular", "Circular"]]); num("Count", it, "count"); chk("Fuse with original", it, "fuse");
         if (it.kind === "circular") { vec("Axis point", it, "point", L); vec("Axis", it, "axis"); num("Total angle (°)", it, "angle"); } else { vec("Direction", it, "direction"); num("Spacing", it, "spacing", L); } }
+      if (it.type === "line") rows.push({ label: "Points (x y z per line)", html: `<textarea data-points="1" rows="4">${it.points.map(p => p.join(" ")).join("\n")}</textarea>` });
+      if (it.type === "surface") { ro("Profiles", it.loops.length); rows.push({ label: "Sketch", html: `<button data-sketch="1">Edit sketch…</button>` }); }
       if (it.type === "import") { ro("File", esc(it.file.split(/[\\/]/).pop())); chk("Heal geometry", it, "heal"); }
     } else if (kind === "body") {
       const pb = p.bodies[id] || (p.bodies[id] = {}); const bi = info?.bodies.find(b => String(b.id) === id);
       title = `Details of "${pb.name || "Body " + id}"`; sec("Definition"); txt("Name", pb, "name"); chk("Suppressed", pb, "suppressed");
       sel("Material", pb, "material", p.materials.map(m => [m.id, m.name]));
+      if (id.startsWith("S")) { sec("Shell section (S4 / S3, MITC4)"); num("Thickness", pb, "thickness", u.length);
+        const sh = info?.sheets?.find(b => "S" + b.id === id); if (sh) ro("Area", fmt(sh.area) + " " + u.length + "²"); }
+      if (id.startsWith("L")) { sec("Beam section (B31, Timoshenko)"); sel("Profile", pb, "profile", [["RECT", "Rectangle (b, h)"], ["CIRC", "Circle (r)"], ["PIPE", "Pipe (r, t)"], ["BOX", "Box (b, h, t)"], ["I", "I-beam (h, b, tf, tw)"], ["GENERAL", "General (A, I2, I3, J)"]]);
+        rows.push({ label: "Dimensions", unit: u.length, html: `<input type="text" data-dims="1" value="${esc((pb.dims || []).join(", "))}">` });
+        vec("Orientation n1 (local 2-axis)", pb, "n1");
+        const ln = info?.lines?.find(b => "L" + b.id === id); if (ln) ro("Length", fmt(ln.length) + " " + u.length); }
       if (bi) { sec("Properties"); ro("Volume", fmt(bi.volume) + " " + u.length + "³"); const m = p.materials.find(m => m.id === pb.material); ro("Mass", fmt((bi.volume || 0) * (m?.density || 0)) + " " + u.mass);
         ro("Centroid", bi.com.map(fmt).join(", ")); }
     } else if (kind === "materials") {
@@ -854,7 +871,8 @@ class App {
       title = `Details of "${it.name}"`; sec("Scope"); scope("Geometry", it, "scope"); sec("Definition"); txt("Name", it, "name"); num("Element size", it, "size", u.length); chk("Suppressed", it, "suppressed");
     } else if (kind === "contact" && it) {
       title = `Details of "${it.name}"`; sec("Scope"); scope("Contact (master)", it, "master"); scope("Target (slave)", it, "slave");
-      sec("Definition"); txt("Name", it, "name"); sel("Type", it, "type", [["bonded", "Bonded (MPC tie, dual mortar)"], ["frictionless", "Frictionless (augmented Lagrange)"]]);
+      sec("Definition"); txt("Name", it, "name"); sel("Type", it, "type", [["bonded", "Bonded (MPC tie, dual mortar)"], ["frictionless", "Frictionless (augmented Lagrange)"], ["frictional", "Frictional (Coulomb)"]]);
+      if (it.type === "frictional") num("Friction coefficient", it, "mu");
       if (it.type !== "bonded") num("Normal stiffness factor", it, "fkn"); chk("Suppressed", it, "suppressed");
     } else if (kind === "ns" && it) {
       title = `Details of "${it.name}"`; sec("Scope"); scope("Geometry", it, "scope"); sec("Definition"); txt("Name", it, "name");
@@ -866,10 +884,13 @@ class App {
         if (a.type !== "explicit") { num("Initial substeps", a, "substeps"); num("Maximum substeps", a, "max_substeps"); } num("Output frames", a, "frames"); }
       if (a.type === "transient" || a.type === "thermal_transient") num("Time step", a, "dt", u.time, { ph: "auto" });
       if (["static", "transient", "explicit", "thermal_stress"].includes(a.type)) { sec("Solver Controls"); chk("Large deflection (NLGEOM)", a, "nlgeom");
-        sel("Solver type", a, "linear_solver", [["auto", "Program controlled"], ["direct", "Direct (sparse LU)"], ["amg", "Iterative AMG-PCG (GPU)"], ["jacobi", "Iterative Jacobi-PCG"]]);
+        sel("Solver type", a, "linear_solver", [["auto", "Program controlled"], ["direct", "Direct (sparse LU, host)"], ["gpu_direct", "Direct on GPU (cuSOLVER)"], ["amg", "Iterative AMG-PCG (GPU, FP64)"], ["mixed", "Iterative AMG-PCG mixed FP32/FP64 (GeForce/RTX)"], ["jacobi", "Iterative Jacobi-PCG"]]);
         sel("Tangent", a, "tangent", [["ebe", "Element-by-element (stored)"], ["jvp", "Matrix-free (AD JVP, minimum memory)"]]); }
       if (a.type === "transient" || a.type === "explicit") num("Mass damping", a, "damping", "1/s");
-      if (a.type === "modal" || a.type === "buckling") { sec("Options"); num("Number of modes", a, "nmodes"); }
+      if (["modal", "buckling", "nonlinear_buckling", "harmonic"].includes(a.type)) { sec("Eigen solver"); num("Number of modes", a, "nmodes");
+        sel("Eigen solver", a, "eigensolver", [["auto", "Program controlled"], ["lanczos", "Shift-invert Lanczos (host)"], ["lobpcg", "Block LOBPCG + AMG (GPU, large models)"]]); }
+      if (a.type === "nonlinear_buckling") { sec("Imperfection / Riks"); num("Imperfection amplitude", a, "imperfection_scale", u.length, { ph: "auto" }); }
+      if (a.type === "harmonic") { sec("Frequency range"); num("Min frequency", a, "fmin", "Hz"); num("Max frequency", a, "fmax", "Hz"); num("Solution intervals", a, "nfreq"); num("Damping ratio", a, "damping_ratio"); }
       if (a.type === "topopt") { const t = a.topopt; sec("Topology Optimization"); num("Retained volume fraction", t, "volfrac"); num("Penalty (SIMP p)", t, "penal"); num("Filter radius", t, "rmin", u.length, { ph: "auto" });
         num("Max iterations", t, "iters"); chk("Exclude loaded / supported elements", t, "keep_bc"); }
       if (a.type.startsWith("thermal") || p.conditions.some(c => c.type === "body_temperature")) { sec("Thermal"); num("Initial / reference temperature", a, "initial_temperature", u.temp); }
@@ -890,6 +911,10 @@ class App {
       if (t === "heat_flux") num("Heat flux (into body)", it, "value", u.flux);
       if (t === "convection") { num("Film coefficient", it, "h", u.film); num("Ambient temperature", it, "ambient", u.temp); }
       if (t === "heat_generation") num("Internal heat generation", it, "value", u.gen);
+      if (t === "remote_displacement") { vec("Remote point (blank = centroid)", it, "point", u.length); vec("Translations (blank = free)", it, "components", u.length); vec("Rotations (blank = free)", it, "rotations", "rad"); }
+      if (t === "remote_force") { vec("Remote point (blank = centroid)", it, "point", u.length); vec("Force", it, "vector", u.force); vec("Moment", it, "moment", u.force + "·" + u.length); }
+      if (t === "bolt_pretension") { num("Pretension force", it, "value", u.force); vec("Bolt axis (blank = longest)", it, "axis"); }
+      if (t === "displacement") vec("Rotations (shells/beams, blank = free)", it, "rotations", "rad");
       if (t === "rigid_wall") { vec("Wall point", it, "point", u.length); vec("Wall normal (into body)", it, "normal"); vec("Wall motion", it, "motion", u.length); num("Penalty factor", it, "fkn"); }
     } else if (kind === "solution" || kind === "solinfo") {
       title = "Details of \"Solution\""; sec("Status"); ro("Status", this.status.solve); ro("Frames", this.frames.length);
@@ -947,6 +972,11 @@ class App {
       if (b.dataset.edges === "all") it.edges = "all";
       else { const s = this.viewer.selection; if (s.dim !== 1 || !s.ids.size) return this.log("select edges first", "warn");
         it.edges = [...s.ids].map(i => this.geom.info.edges.find(e => e.id === i)?.sig).filter(Boolean); }
+      await this.regenerate(); this.select({ kind: "feature", id: it.id }); });
+    D.querySelector("[data-dims]")?.addEventListener("change", e => { const pb = this.project.bodies[id];
+      pb.dims = e.target.value.split(/[,\s]+/).map(Number).filter(isFinite); this.push(); this.renderTree(); });
+    D.querySelector("[data-points]")?.addEventListener("change", async e => {
+      it.points = e.target.value.trim().split(/\n+/).map(l => l.trim().split(/[,\s]+/).map(Number)).filter(r => r.length === 3 && r.every(isFinite));
       await this.regenerate(); this.select({ kind: "feature", id: it.id }); });
     D.querySelector("[data-table]")?.addEventListener("change", e => { const rowsT = e.target.value.trim().split(/\n+/).map(l => l.split(/[,\s]+/).map(Number)).filter(r => r.length >= 2 && r.every(isFinite));
       it.table = rowsT.length ? rowsT : null; this.push(); });

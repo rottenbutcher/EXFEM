@@ -98,6 +98,8 @@ ANALYSES = {
     "transient": "Transient Structural", "explicit": "Explicit Dynamics",
     "thermal": "Steady-State Thermal", "thermal_transient": "Transient Thermal",
     "thermal_stress": "Thermal-Stress (coupled)", "topopt": "Topology Optimization",
+    "nonlinear_buckling": "Nonlinear Buckling (imperfection + Riks)",
+    "harmonic": "Harmonic Response (MSUP)",
     "deck": "Solver deck steps (as imported)",
 }
 
@@ -114,6 +116,10 @@ CONDITIONS = {
     "rotational_velocity": dict(label="Rotational Velocity", group="load", dims=[]),
     "body_temperature": dict(label="Thermal Condition", group="load", dims=[3]),
     "rigid_wall": dict(label="Rigid Wall", group="support", dims=[2]),
+    "simply_supported": dict(label="Simply Supported", group="support", dims=[0, 1]),
+    "remote_displacement": dict(label="Remote Displacement", group="support", dims=[1, 2]),
+    "remote_force": dict(label="Remote Force", group="load", dims=[2]),
+    "bolt_pretension": dict(label="Bolt Pretension", group="load", dims=[3]),
     # thermal
     "temperature": dict(label="Temperature", group="thermal", dims=[0, 1, 2]),
     "heat_flux": dict(label="Heat Flux", group="thermal", dims=[2]),
@@ -267,6 +273,17 @@ def build_spec(project, mesh_spec, info=None, log=print):
             if b.get("suppressed"):
                 continue
             sp.sections.append(dict(elset=es, material=b.get("material", default)))
+        for es in [k for k in sp.elsets if k.startswith("SHEET_")]:          # shells
+            b = p.get("bodies", {}).get("S" + es.split("_", 1)[1], {})
+            if not b.get("suppressed"):
+                sp.sections.append(dict(elset=es, material=b.get("material", default), kind="shell",
+                                        thickness=float(b.get("thickness", 1.0))))
+        for es in [k for k in sp.elsets if k.startswith("LINE_")]:           # beams
+            b = p.get("bodies", {}).get("L" + es.split("_", 1)[1], {})
+            if not b.get("suppressed"):
+                sp.sections.append(dict(elset=es, material=b.get("material", default), kind="beam",
+                                        profile=b.get("profile", "RECT"), dims=b.get("dims", [10.0, 10.0]),
+                                        n1=b.get("n1")))
     a = p["analysis"]
     kind = a["type"]
     if kind == "deck":
@@ -284,6 +301,7 @@ def build_spec(project, mesh_spec, info=None, log=print):
     st = new_step("Step-1", "static", nlgeom=nlgeom, time=T, dt_init=T / sub,
                   dt_max=T / sub if nlgeom or sub > 1 else T, dt_min=T / max(int(a.get("max_substeps", 200)), sub) / 4,
                   frames=int(a.get("frames", 20)), nmodes=int(a.get("nmodes", 6)),
+                  eigensolver=a.get("eigensolver", "auto"),
                   damping=float(a.get("damping", 0.0)))
     heat = dict(fixed=[], flux=[], film=[], gen=[])
     temps = []
@@ -303,13 +321,42 @@ def build_spec(project, mesh_spec, info=None, log=print):
             continue
         nodes = scope_nodes(sp, dim, ids) if ids else np.zeros(0, np.int64)
         vec = np.asarray(c.get("vector", (0, 0, 0)), float)
-        if typ == "fixed":
+        if typ == "fixed":                      # translations + rotations (shell/beam nodes)
+            for k in range(6):
+                st["bcs"].append(dict(nodes=nodes, dof=k, value=0.0))
+        elif typ == "simply_supported":         # translations only
             for k in range(3):
                 st["bcs"].append(dict(nodes=nodes, dof=k, value=0.0))
         elif typ == "displacement":
-            for k, v in enumerate(c.get("components", [0, 0, 0])):
+            comps = list(c.get("components", [0, 0, 0])) + list(c.get("rotations", [None, None, None]))
+            for k, v in enumerate(comps):
                 if v is not None and v != "":
                     st["bcs"].append(dict(nodes=nodes, dof=k, value=float(v)))
+        elif typ == "remote_displacement":
+            rp = f"RP_{c['id']}"
+            sp.constraints.append(dict(type="rigid", nodes=nodes, point=c.get("point"), name=rp))
+            comps = list(c.get("components", [0, 0, 0])) + list(c.get("rotations", [0, 0, 0]))
+            for k, v in enumerate(comps):
+                if v is not None and v != "":
+                    st["bcs"].append(dict(remote=rp, dof=k, value=float(v)))
+        elif typ == "remote_force":
+            surf = scope_surface(sp, dim, ids, name)
+            pt = c.get("point")
+            if pt is None:
+                pt = sp.nodes[nodes].mean(0).tolist()
+            st["dsloads"].append(dict(surface=surf, kind="REMOTE", vector=list(vec), point=list(pt),
+                                      moment=c.get("moment")))
+        elif typ == "bolt_pretension":
+            for b in ids:
+                es = f"BODY_{b}"
+                axis = c.get("axis")
+                if not axis:                     # longest bounding-box direction of the bolt
+                    _, conns = sp.element_table()
+                    nn = np.unique(np.concatenate([conns[e] for e in sp.elsets[es]]))
+                    ext = sp.nodes[nn].max(0) - sp.nodes[nn].min(0)
+                    axis = np.eye(3)[int(np.argmax(ext))].tolist()
+                st.setdefault("bolts", []).append(dict(elset=es, axis=axis, force=float(c.get("value", 0.0)),
+                                                       name=c.get("name", c["id"])))
         elif typ == "frictionless":
             fi = {f["id"]: f for f in (info or {}).get("faces", [])}
             for fid in ids:
@@ -385,6 +432,7 @@ def build_spec(project, mesh_spec, info=None, log=print):
                                        tol=c.get("tol")))
         else:
             sp.contacts.append(dict(type="frictionless", master=ms, slave=ss, fkn=float(c.get("fkn", 1.0)),
+                                    mu=float(c.get("mu", 0.0)) if c["type"] == "frictional" else 0.0,
                                     name=c.get("name", c["id"])))
     st["temperatures"] = temps
     if temps or kind == "thermal_stress":
@@ -417,6 +465,17 @@ def build_spec(project, mesh_spec, info=None, log=print):
         h = new_step("Thermal", "heat", time=1.0, heat=heat)
         sp.steps.append(h)
         st["name"] = "Structural"
+        sp.steps.append(st)
+    elif kind == "nonlinear_buckling":
+        st["procedure"] = "postbuckling"
+        st["nlgeom"] = True
+        st["imperfection"] = dict(modes=[int(x) for x in a.get("imperfection_modes", [1])],
+                                  scale=a.get("imperfection_scale"))
+        sp.steps.append(st)
+    elif kind == "harmonic":
+        st["procedure"] = "harmonic"
+        st["harmonic"] = dict(fmin=float(a.get("fmin", 1.0)), fmax=float(a.get("fmax", 1000.0)),
+                              nfreq=int(a.get("nfreq", 200)), damping=float(a.get("damping_ratio", 0.02)))
         sp.steps.append(st)
     elif kind == "topopt":
         st["procedure"] = "topopt"

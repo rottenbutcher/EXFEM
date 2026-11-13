@@ -22,6 +22,7 @@ import numpy as np
 from .. import project as P
 from ..cad.geometry import CadModel, GeometryError, GMSH_LOCK
 from ..elements import ELEMENTS, FACETS
+from ..structural import STRUCT_ELEMENTS
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -129,7 +130,7 @@ class Session:
         from ..cad.geometry import match
         old = self.project.get("bodies", {})
         new = {}
-        refs = [(k, v) for k, v in old.items() if v.get("sig")]
+        refs = [(k, v) for k, v in old.items() if v.get("sig") and k.isdigit()]
         cand_ids = [b["id"] for b in self.info["bodies"]]
         for k, v in refs:
             ids, _ = match(self.info, 3, [dict(id=int(k), sig=v["sig"])])
@@ -141,6 +142,23 @@ class Session:
         for i, b in enumerate(self.info["bodies"]):
             if str(b["id"]) not in new:
                 new[str(b["id"])] = dict(name=f"Body {b['id']}", material=mat0, sig=b["sig"])
+        # sheet (shell) and line (beam) bodies keep their section data by signature
+        diag = self.info.get("diag", 1.0)
+        for pre, key, dim, defaults in (("S", "sheets", 2, dict(thickness=max(diag / 100, 1e-3))),
+                                        ("L", "lines", 1, dict(profile="RECT", dims=[max(diag / 50, 1e-3)] * 2))):
+            olds = {k: v for k, v in old.items() if k.startswith(pre) and v.get("sig")}
+            for b in self.info.get(key, []):
+                k = pre + str(b["id"])
+                hit = None
+                for ok, ov in olds.items():
+                    ids, _ = match(self.info, dim, [dict(id=int(ok[1:]), sig=ov["sig"])])
+                    if ids and ids[0] == b["id"]:
+                        hit = ov
+                        break
+                nv = dict(hit) if hit else dict(name=f"{'Surface' if pre == 'S' else 'Line'} body {b['id']}",
+                                                material=mat0, **defaults)
+                nv["sig"] = b["sig"]
+                new[k] = nv
         self.project["bodies"] = new
 
     def geometry_payload(self):
@@ -322,8 +340,10 @@ class Session:
             if f in internal:
                 continue
             for e, k in zip(s["elems"], s["faces"]):
-                et = ELEMENTS[types[e]]
-                loc = et.faces[k]
+                if types[e] in STRUCT_ELEMENTS:                 # shell element: the element itself
+                    loc = list(range(len(conns[e])))
+                else:
+                    loc = ELEMENTS[types[e]].faces[k]
                 ft = FACETS[len(loc)]
                 nodes = np.asarray([conns[e][i] for i in loc])[None]
                 t = ft.triangles(nodes)
@@ -338,21 +358,34 @@ class Session:
                     ring = ring2
                 for a in range(len(ring)):
                     edges.add(tuple(sorted((ring[a], ring[(a + 1) % len(ring)]))))
-        if not tris:
+        segs, seg_edge = [], []
+        for name, es in sp.elsets.items():
+            if name.startswith("LINE_"):
+                eid = int(name.split("_")[1])
+                for e in es:
+                    segs.append(conns[e][:2])
+                    seg_edge.append(eid)
+        if not tris and not segs:
             return None
-        tri = np.concatenate(tris)
-        used, inv = np.unique(tri, return_inverse=True)
+        tri = np.concatenate(tris) if tris else np.zeros((0, 3), np.int64)
+        segs = np.asarray(segs, np.int64).reshape(-1, 2)
+        used = np.unique(np.concatenate([tri.ravel(), segs.ravel()]))
         lut = {int(n): i for i, n in enumerate(used)}
-        ed = np.array([[lut[a], lut[b]] for a, b in edges if a in lut and b in lut], np.int32)
-        return dict(nodes=used, xyz=X[used], tri=inv.reshape(-1, 3).astype(np.int32),
-                    face_of_tri=np.asarray(fid, np.int32), edges=ed)
+        remap = np.vectorize(lambda n: lut[int(n)], otypes=[np.int64])
+        ed = np.array([[lut[a], lut[b]] for a, b in edges if a in lut and b in lut], np.int32).reshape(-1, 2)
+        return dict(nodes=used, xyz=X[used], tri=(remap(tri) if len(tri) else tri).reshape(-1, 3).astype(np.int32),
+                    face_of_tri=np.asarray(fid, np.int32), edges=ed,
+                    lines=(remap(segs) if len(segs) else segs).astype(np.int32).reshape(-1, 2),
+                    line_edge=np.asarray(seg_edge, np.int32))
 
     def mesh_payload(self):
         d = self.display
         if d is None:
             return dict(stats=self.mesh_stats)
         return dict(stats=self.mesh_stats, xyz=b64(d["xyz"]), tri=b64(d["tri"], np.int32),
-                    face_of_tri=b64(d["face_of_tri"], np.int32), edges=b64(d["edges"], np.int32))
+                    face_of_tri=b64(d["face_of_tri"], np.int32), edges=b64(d["edges"], np.int32),
+                    lines=b64(d.get("lines", np.zeros((0, 2))), np.int32),
+                    line_edge=b64(d.get("line_edge", np.zeros(0)), np.int32))
 
     # ---------------------------------------------------------- solve
     def start(self, fn, name):
