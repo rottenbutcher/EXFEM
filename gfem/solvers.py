@@ -245,6 +245,7 @@ class _LinearSystem:
         self.multi_gpu = multi_gpu
         # device CSR operator (atomic-free, less memory traffic) - default on GPUs
         self.operator = operator if operator != "auto" else "gather"
+        self.async_amg = 150000          # dofs above which AMG setup runs in a background thread
         self.cg_tol, self.cg_maxiter = cg_tol, cg_maxiter
         self.amg = None
         self.amg_iters0 = None
@@ -285,6 +286,25 @@ class _LinearSystem:
             A = lambda v: opA(ops, free, tp, jv, v)
             if kind == "jacobi":
                 M = lambda r: pp * r
+            elif kind == "cheby":
+                # setup-free Chebyshev-Jacobi polynomial preconditioner (device only)
+                dinv, lmax = pp["dinv"], pp["lmax"]
+
+                def M(r):
+                    lo, hi = lmax / 30.0, lmax
+                    th, de = 0.5 * (hi + lo), 0.5 * (hi - lo)
+                    sg = th / de
+                    rh = 1.0 / sg
+                    res = dinv * r
+                    d = res / th
+                    x = jnp.zeros_like(r)
+                    for _ in range(6):
+                        x = x + d
+                        res = res - dinv * A(d)
+                        rn = 1.0 / (2 * sg - rh)
+                        d = rn * rh * d + 2 * rn / de * res
+                        rh = rn
+                    return x + d
             else:
                 # fine level smoothed with the *current* tangent: the frozen hierarchy only
                 # supplies the coarse spaces, so it stays effective as the Newton tangent evolves
@@ -304,6 +324,22 @@ class _LinearSystem:
         A = ops_assemble(ops, self.m.ndof)
         A = setup.tr.project_matrix(A)
         return linalg.bc_matrix(A, setup.free_np)
+
+    def _lmax(self, ops, setup, tp, dinv):
+        """Largest eigenvalue of D^-1 A by power iteration on the device (Chebyshev bound)."""
+        if not hasattr(self, "_jlmax"):
+            opA = self._opA
+
+            def f(ops, free, tp, dinv):
+                v = jnp.sin(jnp.arange(free.shape[0]) * 0.37 + 0.1) * free + 1e-3
+                lam = 1.0
+                for _ in range(25):
+                    w = dinv * opA(ops, free, tp, None, v)
+                    lam = jnp.linalg.norm(w) / jnp.linalg.norm(v)
+                    v = w / jnp.linalg.norm(w)
+                return 1.1 * lam
+            self._jlmax = jax.jit(f)
+        return self._jlmax(ops, setup.free, tp, dinv)
 
     def _mixed(self, ops, b, setup, rebuild):
         """FP32 AMG-PCG inner solves + FP64 iterative refinement (defect correction).
@@ -362,7 +398,7 @@ class _LinearSystem:
         if self.multi_gpu and jax.device_count() > 1 and self.method not in ("direct", "gpu_direct"):
             from .parallel import shard_ops
             ops = shard_ops(ops)
-        elif self.operator == "gather" and self.method in ("amg", "jacobi", "mixed") and isinstance(ops, list) \
+        elif self.operator == "gather" and self.method in ("amg", "jacobi", "mixed", "cheby") and isinstance(ops, list) \
                 and len(ops) >= len(self.m.blocks) and self.m.blocks:
             nb = len(self.m.blocks)
             self._full_ops = ops
@@ -387,17 +423,45 @@ class _LinearSystem:
             x = linalg.Direct(A).solve(np.asarray(b))
             self.last_iters = 1
             return jnp.asarray(x)
+        if self.method == "cheby":
+            d = _diag_any(ops, self.m.ndof)
+            dinv = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
+            x, k, rr = self._pcg_fn("cheby")(ops, b, setup.free, tp, dict(dinv=dinv, lmax=self._lmax(ops, setup, tp, dinv)), jvp_args)
+            self.last_iters = int(k)
+            return x
         if self.method == "jacobi":
             d = _diag_any(ops, self.m.ndof)
             pp = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
             x, k, rr = self._pcg_fn("jacobi")(ops, b, setup.free, tp, pp, jvp_args)
         else:
-            if self.amg is None or rebuild:
-                t0 = time.time()
-                self.amg = linalg.AMG(self.assemble(self._full_ops if isinstance(ops, dict) else ops, setup), np.asarray(self.m.X),
-                                      rot_mask=self.m.rot_mask() if self.m.rot_of else None)
+            fut = getattr(self, "_amg_future", None)
+            if fut is not None and fut.done():
+                self.amg, self._amg_future = fut.result(), None
                 self.amg_iters0 = None
-                self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
+                self.mon.log(f"    {self.amg.info()}  (built in background)")
+            if (self.amg is None or rebuild) and getattr(self, "_amg_future", None) is None:
+                full = self._full_ops if isinstance(ops, dict) else ops
+                rm = self.m.rot_mask() if self.m.rot_of else None
+                if self.m.ndof >= self.async_amg:
+                    # host AMG setup overlapped with device iterations (Chebyshev meanwhile)
+                    import concurrent.futures as cf
+                    A_host = self.assemble(full, setup)
+                    Xh = np.asarray(self.m.X)
+                    self._pool = getattr(self, "_pool", None) or cf.ThreadPoolExecutor(1)
+                    self._amg_future = self._pool.submit(linalg.AMG, A_host, Xh, rot_mask=rm)
+                    self.mon.log("    AMG setup started in background; Chebyshev-Jacobi PCG meanwhile")
+                else:
+                    t0 = time.time()
+                    self.amg = linalg.AMG(self.assemble(full, setup), np.asarray(self.m.X), rot_mask=rm)
+                    self.amg_iters0 = None
+                    self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
+            if self.amg is None or (rebuild and getattr(self, "_amg_future", None) is not None):
+                d = _diag_any(ops, self.m.ndof)
+                dinv = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
+                lmax = self._lmax(ops, setup, tp, dinv)
+                x, k, rr = self._pcg_fn("cheby")(ops, b, setup.free, tp, dict(dinv=dinv, lmax=lmax), jvp_args)
+                self.last_iters = int(k)
+                return x
             x, k, rr = self._pcg_fn("amg", self.amg)(ops, b, setup.free, tp, self.amg.params(), jvp_args)
             k = int(k)
             if self.amg_iters0 is None:
