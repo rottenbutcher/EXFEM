@@ -326,6 +326,23 @@ class Model:
         self.blocks.append(b)
         return b
 
+    def add_spring(self, conn, k, kind="axial", name=None):
+        from .discrete import SpringBlock
+        b = SpringBlock(conn, k, kind, name or f"spring{len(self.blocks)}")
+        self.blocks.append(b)
+        return b
+
+    def add_ground_spring(self, nodes, k, name=None):
+        from .discrete import GroundSpring
+        b = GroundSpring(nodes, k, name or f"gspring{len(self.blocks)}")
+        self.blocks.append(b)
+        return b
+
+    def add_point_mass(self, nodes, mass, inertia=0.0):
+        """Lumped point mass (split equally over `nodes`, e.g. a remote point or a face)."""
+        nodes = np.atleast_1d(np.asarray(nodes, dtype=np.int64))
+        self.point_masses = getattr(self, "point_masses", []) + [(nodes, float(mass) / len(nodes), float(inertia) / len(nodes))]
+
     def add_block(self, conn, etype, material, name=None):
         b = Block(conn, etype, material, name or f"block{len(self.blocks)}")
         self.blocks.append(b)
@@ -467,6 +484,11 @@ class Model:
         m = jnp.zeros(self.nn)
         for b in self.blocks:
             m = m.at[b.conn].add(b.mass(self.X[b.conn]))
+        for nodes, pm, pi in getattr(self, "point_masses", []):
+            m = m.at[nodes].add(pm)
+            rows = [self.rot_of[int(n)] for n in nodes if int(n) in self.rot_of]
+            if rows and pi:
+                m = m.at[jnp.asarray(rows)].add(pi)
         return jnp.repeat(m, 3)
 
     def volumes(self):

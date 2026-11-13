@@ -79,7 +79,10 @@ class HeatTransfer:
         return ops
 
     def solve(self, fixed=(), flux=(), film=(), gen=None, T0=None, transient=None,
-              monitor=None, method="auto"):
+              monitor=None, method="auto", radiation=(), sigma=5.670374419e-14, offset=273.15):
+        """radiation: [(Surface, emissivity, T_ambient)] surface-to-ambient radiation
+        q = eps sigma (T^4 - Ta^4) on absolute temperatures (T + offset); sigma defaults to
+        the Stefan-Boltzmann constant in mm-N-s units (W/mm^2 K^4); use 5.670374419e-8 for SI."""
         """fixed: [(nodes, T)], flux: [(Surface, q)] (q into body), film: [(Surface, h, Tinf)],
         gen: {block: q}. transient: dict(time=, dt=, frames=) -> backward Euler from T0.
         Returns final nodal temperatures (and stores self.history for transient)."""
@@ -125,8 +128,36 @@ class HeatTransfer:
             # move the prescribed temperatures to the right-hand side
             return np.where(fixed_mask, Tfix, b - A @ (Tfix * fixed_mask))
 
+        wr = np.zeros(nn)
+        Ta4 = np.zeros(nn)
+        for srf, eps, Ta in radiation:
+            w, _, _ = srf.integrate(X)
+            wr += eps * w
+            Ta4 += eps * w * (Ta + offset) ** 4
+        Ta4 = np.where(wr > 0, Ta4 / np.maximum(wr, 1e-300), 0.0)
+
+        def newton(Aop, b, Tg):
+            """Newton on the radiation term (lumped): (A + dRad) dT = -R."""
+            import scipy.sparse as sp
+            T = Tg.copy()
+            for it in range(40):
+                Ta_ = T + offset
+                R = Aop @ T - b + wr * sigma * (Ta_ ** 4 - Ta4)
+                R[fixed_mask] = 0.0
+                J = (Aop + sp.diags(4 * wr * sigma * Ta_ ** 3)).tocsr()
+                dT = linalg.Direct(linalg.bc_matrix(J, free)).solve(np.where(fixed_mask, 0.0, -R))
+                T = T + dT
+                if np.abs(dT).max() < 1e-8 * max(np.abs(T).max(), 1.0):
+                    break
+            return T
+
         if transient is None:
-            T = solve_lin(K, rhs_bc(K, rhs))
+            if radiation:                 # start from ambient (the radiation-free system may be singular)
+                Tg = np.full(nn, float(np.mean([r[2] for r in radiation])))
+                Tg[fixed_mask] = Tfix[fixed_mask]
+                T = newton(K, rhs, Tg)
+            else:
+                T = solve_lin(K, rhs_bc(K, rhs))
             if mon:
                 mon.log(f"  heat transfer (steady): {nn} nodes, T in [{T.min():.4g}, {T.max():.4g}], "
                         f"{time.time() - t0:.2f}s")
@@ -148,6 +179,8 @@ class HeatTransfer:
         for i in range(1, nsteps + 1):
             b = rhs + C / dt * T
             T = lu.solve(rhs_bc(A, b))
+            if radiation:
+                T = newton(A, b, T)
             if i % every == 0 or i == nsteps:
                 self.history.append((i * dt, T.copy()))
                 if mon:
