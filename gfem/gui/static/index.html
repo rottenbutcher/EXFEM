@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gfem Mechanical</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.min.js", "three/addons/": "/static/vendor/" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <header id="titlebar">
+    <div class="logo"><span class="logo-g">g</span>fem <b>Mechanical</b></div>
+    <div class="file-btns">
+      <button id="btn-new" title="New project">New</button>
+      <button id="btn-open" title="Open project (.gfem.json)">Open</button>
+      <button id="btn-save" title="Save project">Save</button>
+      <div class="dropdown"><button>Examples ▾</button><div class="menu" id="examples-menu"></div></div>
+      <div class="dropdown"><button>Export ▾</button><div class="menu">
+        <a data-export="inp">Abaqus input (.inp)</a><a data-export="bdf">Nastran bulk data (.bdf)</a>
+        <a data-export="step">CAD STEP (.step)</a><a data-export="stl">CAD STL (.stl)</a>
+        <a data-export="vtu">Results ParaView (.vtu)</a><a data-export="csv">Nodal results (.csv)</a>
+        <a data-export="json">Project (.gfem.json)</a><a id="btn-shot">Screenshot (.png)</a></div></div>
+    </div>
+    <input id="proj-name" value="Untitled" spellcheck="false">
+    <div class="sys" id="sys-info"></div>
+  </header>
+  <nav id="ribbon-tabs">
+    <button data-tab="home" class="on">Home</button><button data-tab="geometry">Geometry</button>
+    <button data-tab="mesh">Mesh</button><button data-tab="setup">Environment</button>
+    <button data-tab="solve">Solution</button><button data-tab="results">Results</button>
+    <button data-tab="display">Display</button>
+  </nav>
+  <section id="ribbon"></section>
+  <main id="main">
+    <aside id="left">
+      <div class="panel" id="outline-panel"><div class="ph">Outline</div><div id="tree"></div></div>
+      <div class="splitter-h" id="split-left"></div>
+      <div class="panel" id="details-panel"><div class="ph" id="details-title">Details</div><div id="details"></div></div>
+    </aside>
+    <div class="splitter-v" id="split-main"></div>
+    <section id="center">
+      <div id="viewport">
+        <div class="vp-toolbar">
+          <div class="seg" id="sel-filter">
+            <button data-f="vertex" title="Vertex selection">●</button><button data-f="edge" title="Edge selection">╱</button>
+            <button data-f="face" class="on" title="Face selection">▰</button><button data-f="body" title="Body selection">⬛</button>
+          </div>
+          <button id="btn-selall" title="Select all (Ctrl+A)">All</button>
+          <button id="btn-selclear" title="Clear selection (Esc)">Clear</button>
+          <span class="sep"></span>
+          <div class="seg" id="views">
+            <button data-v="iso" title="Isometric">ISO</button><button data-v="front" title="Front (+Z)">F</button>
+            <button data-v="top" title="Top (+Y)">T</button><button data-v="right" title="Right (+X)">R</button>
+            <button data-v="back" title="Back">B</button><button data-v="left" title="Left">L</button>
+            <button data-v="bottom" title="Bottom">Bt</button><button data-v="fit" title="Zoom to fit">Fit</button>
+          </div>
+          <span class="sep"></span>
+          <div class="seg" id="modes"><button data-m="geometry" class="on">Geometry</button><button data-m="mesh">Mesh</button><button data-m="result">Result</button></div>
+        </div>
+        <div class="legend" id="legend"></div>
+        <div class="marks"></div>
+        <div class="vp-msg" id="vp-msg"></div>
+        <div class="anim-bar" id="anim-bar">
+          <button id="anim-play" title="Play / pause">▶</button>
+          <input type="range" id="frame-slider" min="0" max="0" value="0">
+          <span id="frame-label"></span>
+        </div>
+        <div class="hover" id="hover"></div>
+      </div>
+      <div class="splitter-h" id="split-bottom"></div>
+      <div id="bottom">
+        <nav class="btabs"><button data-b="messages" class="on">Messages</button><button data-b="solinfo">Solution Information</button>
+          <button data-b="tabular">Tabular Data</button><button data-b="graph">Graph</button></nav>
+        <div class="bpane on" id="b-messages"><div id="log"></div></div>
+        <div class="bpane" id="b-solinfo"><canvas id="chart-res"></canvas><canvas id="chart-time"></canvas></div>
+        <div class="bpane" id="b-tabular"><div id="tabular"></div></div>
+        <div class="bpane" id="b-graph"><canvas id="chart-graph"></canvas></div>
+      </div>
+    </section>
+  </main>
+  <footer id="status">
+    <span id="st-msg">Ready</span><span id="st-sel"></span><span id="st-job"></span><span id="st-units"></span>
+  </footer>
+</div>
+
+<div class="dlg" id="sketch-dlg">
+  <div class="dlg-box sketch">
+    <div class="dlg-title">Sketch</div>
+    <div class="sk-body">
+      <div class="sk-tools">
+        <div class="grp"><label>Plane</label><select id="sk-plane"><option>XY</option><option>YZ</option><option>ZX</option></select>
+          <label>Offset</label><input id="sk-offset" type="number" value="0"></div>
+        <div class="grp tools"><button data-tool="polyline" class="on">Polyline</button><button data-tool="rect">Rectangle</button>
+          <button data-tool="circle">Circle</button><button data-tool="slot">Slot</button></div>
+        <div class="grp"><label>Segment bulge (0=line, ±1=half circle)</label><input id="sk-arc" type="number" step="0.1" value="0">
+          <label>Slot radius</label><input id="sk-slot-r" type="number" value="3"></div>
+        <div class="grp"><label>Point x / y</label><div class="row"><input id="sk-px" type="number" value="0"><input id="sk-py" type="number" value="0"></div>
+          <div class="row"><button id="sk-add-pt">Add point</button><button id="sk-close">Close</button></div>
+          <label>Circle r</label><div class="row"><input id="sk-r" type="number" value="5"><button id="sk-add-circle">Add circle</button></div></div>
+        <div class="grp"><label>Grid</label><div class="row"><input id="sk-grid" type="number" value="5"><label class="chk"><input id="sk-snap" type="checkbox" checked>snap</label></div>
+          <button id="sk-fit">Zoom to fit</button>
+          <label class="file-btn">Import DXF…<input id="sk-dxf" type="file" accept=".dxf"></label></div>
+        <div class="grp"><label>Profiles</label><div id="sk-list"></div></div>
+      </div>
+      <div class="sk-canvas"><canvas></canvas><div id="sk-coord"></div></div>
+      <div class="sk-tools">
+        <div class="grp"><label>Operation</label><select id="sk-op"><option value="extrude">Extrude</option><option value="revolve">Revolve</option><option value="surface">Surface body (shell)</option></select>
+          <label>Depth</label><input id="sk-dist" type="number" value="20"><label class="chk"><input id="sk-sym" type="checkbox">symmetric</label>
+          <label>Revolve angle (°)</label><input id="sk-angle" type="number" value="360">
+          <label>Revolve axis</label><select id="sk-axis"><option value="y">sketch Y axis</option><option value="x">sketch X axis</option></select></div>
+        <div class="grp"><label>Result</label><select id="sk-bool"><option value="new">New body</option><option value="fuse">Add material</option>
+          <option value="cut">Cut material</option><option value="intersect">Intersect</option></select>
+          <label>Target body</label><select id="sk-target"></select></div>
+      </div>
+    </div>
+    <div class="dlg-btns"><button id="sk-cancel">Cancel</button><button id="sk-ok" class="primary">OK – Generate</button></div>
+  </div>
+</div>
+<input type="file" id="file-cad" accept=".step,.stp,.iges,.igs,.brep,.stl,.dxf" hidden>
+<input type="file" id="file-deck" accept=".inp,.bdf,.nas,.dat,.cdb,.msh,.unv,.med" hidden>
+<input type="file" id="file-proj" accept=".json" hidden>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
