@@ -88,6 +88,7 @@ def read_bdf(path):
     sp = Spec(path)
     grids, elems, props, mats, mat4 = {}, [], {}, {}, {}
     spcs, forces, ploads, gravs, combos, temps, eigrl = {}, {}, {}, {}, {}, {}, {}
+    shellp, beamp, moments = {}, {}, {}
     for name, f in bulk:
         v = [_num(x) if isinstance(x, str) else x for x in f]
         v = [x for x in v]
@@ -99,6 +100,24 @@ def read_bdf(path):
             elems.append((name, g(0), g(1), nodes))
         elif name == "PSOLID":
             props[g(0)] = g(1)
+        elif name in ("CQUAD4", "CTRIA3", "CQUADR", "CTRIAR"):
+            nn = 4 if name.startswith("CQUAD") else 3
+            elems.append((name, g(0), g(1), [int(x) for x in v[2:2 + nn]]))
+        elif name in ("CBAR", "CBEAM"):
+            x1, x2, x3 = g(4), g(5), g(6)
+            orient = ("G0", x1) if isinstance(x1, int) and x2 is None else ("V", (x1 or 0.0, x2 or 0.0, x3 or 0.0))
+            elems.append((name, g(0), g(1), [g(2), g(3)], orient))
+        elif name == "PSHELL":
+            shellp[g(0)] = (g(1), g(2, 1.0))
+        elif name in ("PBARL", "PBEAML"):
+            typ = str(v[3] if name == "PBARL" else v[3]).upper()
+            dims = [float(x) for x in v[4:] if isinstance(x, (int, float))]
+            beamp[g(0)] = (g(1), typ, dims)
+        elif name in ("PBAR", "PBEAM"):
+            beamp[g(0)] = (g(1), "PBAR", [g(2, 1.0), g(3, 1.0), g(4, 1.0), g(5, 1.0)])
+        elif name == "MOMENT":
+            mv = g(3, 0.0) * np.array([g(4, 0.0), g(5, 0.0), g(6, 0.0)])
+            moments.setdefault(g(0), []).append((g(1), mv))
         elif name == "MAT1":
             E, G, nu = g(1), g(2), g(3)
             if nu is None and E and G:
@@ -150,8 +169,22 @@ def read_bdf(path):
     idx = {n: i for i, n in enumerate(ids)}
     sp.add_nodes(np.array([grids[n] for n in ids]), ids)
     by = {}
-    for name, eid, pid, nodes in elems:
+    beams = {}
+    for rec in elems:
+        name, eid, pid, nodes = rec[:4]
         n = len(nodes)
+        if name in ("CBAR", "CBEAM"):
+            o = rec[4]
+            if o[0] == "G0":
+                vec = np.asarray(grids[o[1]]) - np.asarray(grids[nodes[0]])
+            else:
+                vec = np.asarray(o[1], float)
+            key = (pid, tuple(np.round(vec / max(np.linalg.norm(vec), 1e-300), 6)))
+            beams.setdefault(key, []).append((eid, [idx[x] for x in nodes]))
+            continue
+        if name.startswith("CQUAD") or name.startswith("CTRIA"):
+            by.setdefault(("S4" if n == 4 else "S3", pid), []).append((eid, [idx[x] for x in nodes]))
+            continue
         if name == "CTETRA":
             et = "C3D10" if n >= 10 else "C3D4"
             nodes = nodes[:10] if n >= 10 else nodes[:4]
@@ -173,7 +206,27 @@ def read_bdf(path):
             m = dict(mats[mid])
             m.update(mat4.get(mid, {}))
             sp.materials[f"MAT_{mid}"] = m
+        if et in ("S4", "S3"):
+            mid, t = shellp.get(pid, (pid, 1.0))
+            if f"MAT_{mid}" not in sp.materials and mid in mats:
+                sp.materials[f"MAT_{mid}"] = dict(mats[mid])
+            sp.sections.append(dict(elset=es, material=f"MAT_{mid}", kind="shell", thickness=float(t)))
+            continue
         sp.sections.append(dict(elset=es, material=f"MAT_{mid}"))
+    for k, ((pid, n1), rows) in enumerate(beams.items()):
+        es = f"PID_{pid}_B{k}"
+        gi = sp.add_elements("B31", np.array([r for _, r in rows]), [e for e, _ in rows], elset=es)
+        for (e, _), i in zip(rows, gi):
+            eglob[e] = (i, "B31", len(sp.groups) - 1)
+        mid, typ, d = beamp.get(pid, (pid, "BAR", [1.0, 1.0]))
+        d = list(d) + [1.0] * (6 - len(d))
+        prof = {"BAR": ("RECT", d[:2]), "ROD": ("CIRC", d[:1]), "TUBE": ("PIPE", [d[0], d[0] - d[1]]),
+                "BOX": ("BOX", [d[0], d[1], d[2]]), "I": ("I", [d[0], d[1], d[4], d[3]]),
+                "PBAR": ("GENERAL", [d[0], d[2], d[1], d[3]])}.get(typ, ("RECT", d[:2]))
+        if f"MAT_{mid}" not in sp.materials and mid in mats:
+            sp.materials[f"MAT_{mid}"] = dict(mats[mid])
+        sp.sections.append(dict(elset=es, material=f"MAT_{mid}", kind="beam", profile=prof[0],
+                                dims=[float(x) for x in prof[1]], n1=list(n1)))
     # case control
     sub = {"SPC": None, "LOAD": None, "METHOD": None, "TEMP": None}
     for line in case:
@@ -191,7 +244,7 @@ def read_bdf(path):
     grp = {}
     for n, comp, val in spcs.get(spc_id, []):
         for c in str(comp):
-            if c in "123":
+            if c in "123456":
                 grp.setdefault((int(c) - 1, float(val or 0.0)), []).append(idx[n])
     st["bcs"] = [dict(nodes=np.array(v), dof=k[0], value=k[1]) for k, v in grp.items()]
     lid = sub["LOAD"] or (next(iter({**forces, **ploads, **gravs, **combos})) if (forces or ploads or gravs) else None)
@@ -199,6 +252,11 @@ def read_bdf(path):
     fg = {}
     from ..elements import ELEMENTS
     for scale, sid in parts:
+        for n, mv in moments.get(sid, []):
+            for d in range(3):
+                if mv[d]:
+                    fg.setdefault(d + 3, {}).setdefault(idx[n], 0.0)
+                    fg[d + 3][idx[n]] += scale * mv[d]
         for n, fv in forces.get(sid, []):
             for d in range(3):
                 if fv[d]:
@@ -275,6 +333,9 @@ def write_bdf(spec, path):
     off = 0
     pid_of = {}
     for g in spec.groups:
+        if g.etype in ("S4", "S4R", "S3", "S3R", "B31", "B33"):
+            off += len(g.conn)
+            continue
         name = {"C3D4": "CTETRA", "C3D10": "CTETRA", "C3D8": "CHEXA", "C3D8R": "CHEXA", "C3D8H": "CHEXA",
                 "C3D8I": "CHEXA", "C3D20": "CHEXA", "C3D20R": "CHEXA", "C3D6": "CPENTA", "C3D10M": "CTETRA"}[g.etype]
         for k, (e, row) in enumerate(zip(g.ids, g.conn)):
@@ -289,6 +350,43 @@ def write_bdf(spec, path):
         off += len(g.conn)
     for mname, pid in pid_of.items():
         L.append(f"PSOLID,{pid},{mid[mname]}")
+    # shells and beams: one property per section
+    secs = {sec["elset"]: sec for sec in spec.sections}
+    pid_next = len(pid_of) + 100
+    estart = np.cumsum([0] + [len(g.conn) for g in spec.groups])
+    eset_of = {}
+    for es_name, idxs in spec.elsets.items():
+        for e in np.asarray(idxs):
+            eset_of.setdefault(int(e), es_name)
+    done_pid = {}
+    for gi_, g in enumerate(spec.groups):
+        if g.etype not in ("S4", "S4R", "S3", "S3R", "B31", "B33"):
+            continue
+        for k, (e, row) in enumerate(zip(g.ids, g.conn)):
+            sec = secs.get(eset_of.get(int(estart[gi_] + k)), None) or next(x for x in spec.sections if x.get("kind") in ("shell", "beam"))
+            key = sec["elset"]
+            if key not in done_pid:
+                pid_next += 1
+                done_pid[key] = pid_next
+                mm = mid[sec["material"]]
+                if sec.get("kind") == "shell":
+                    L.append(f"PSHELL,{pid_next},{mm},{sec['thickness']:.9g},{mm},,{mm}")
+                else:
+                    prof, d = sec.get("profile", "RECT").upper(), sec.get("dims", [1, 1])
+                    if prof == "GENERAL":
+                        L.append(f"PBAR,{pid_next},{mm},{d[0]:.9g},{d[2]:.9g},{d[1]:.9g},{d[3]:.9g}")
+                    else:
+                        t, dd = {"RECT": lambda: ("BAR", d[:2]), "CIRC": lambda: ("ROD", d[:1]),
+                                 "PIPE": lambda: ("TUBE", [d[0], d[0] - d[1]]), "BOX": lambda: ("BOX", [d[0], d[1], d[2], d[2]]),
+                                 "I": lambda: ("I", [d[0], d[1], d[1], d[3], d[2], d[2]])}[prof]()
+                        L.append(f"PBARL,{pid_next},{mm},,{t}")
+                        L.append(",".join([""] + [f"{x:.9g}" for x in dd]))
+            p_ = done_pid[key]
+            if g.etype.startswith("S"):
+                L.append(f"{'CQUAD4' if len(row) == 4 else 'CTRIA3'},{e},{p_}," + ",".join(str(nid[n]) for n in row))
+            else:
+                n1 = sec.get("n1") or [0.0, 0.0, 1.0]
+                L.append(f"CBAR,{e},{p_},{nid[row[0]]},{nid[row[1]]},{n1[0]:.9g},{n1[1]:.9g},{n1[2]:.9g}")
     for mname, k in mid.items():
         p = spec.materials[mname]
         L.append(f"MAT1,{k},{p.get('E', 0):.9g},,{p.get('nu', 0.3):.9g},{p.get('density', 0):.9g},"
@@ -302,9 +400,10 @@ def write_bdf(spec, path):
                     L.append(f"SPC,1,{nid[n]},{b['dof'] + 1},{b['value']:.9g}")
         for c in st["cloads"]:
             v = [0.0, 0.0, 0.0]
-            v[c["dof"]] = 1.0
+            v[c["dof"] % 3] = 1.0
+            card = "FORCE" if c["dof"] < 3 else "MOMENT"
             for n in np.asarray(c["nodes"]):
-                L.append(f"FORCE,1,{nid[n]},0,{c['value']:.9g},{v[0]},{v[1]},{v[2]}")
+                L.append(f"{card},1,{nid[n]},0,{c['value']:.9g},{v[0]},{v[1]},{v[2]}")
         for n, f in spec.equivalent_nodal_loads(st).items():
             mag = float(np.linalg.norm(f))
             L.append(f"FORCE,1,{nid[n]},0,{mag:.12g},{f[0] / mag:.12g},{f[1] / mag:.12g},{f[2] / mag:.12g}")

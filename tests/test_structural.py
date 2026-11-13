@@ -209,3 +209,29 @@ def test_explicit_shell_plate_dynamic_factor():
     gfem.ExplicitSolver(m, verbose=False, monitor=mon).solve(st)
     ust = L ** 3 / (3 * E * I)
     assert 1.75 < max(peak) / ust < 2.15
+
+
+def test_shell_beam_nastran_roundtrip(tmp_path):
+    from gfem.io.inp import read_inp_spec
+    from gfem.io.nastran import write_bdf, read_bdf
+    from gfem.analysis import run_spec
+    X, c = _plate(100, 50, 10, 5)
+    stiff = [i for i in range(len(X)) if abs(X[i, 1] - 20) < 1e-9]
+    L = ["*NODE"] + [f"{i + 1}, {x[0]}, {x[1]}, {x[2]}" for i, x in enumerate(X)]
+    L += ["*ELEMENT, TYPE=S4, ELSET=PLATE"] + [f"{e + 1}, " + ", ".join(str(k + 1) for k in r) for e, r in enumerate(c)]
+    L += ["*ELEMENT, TYPE=B31, ELSET=STIFF"] + [f"{1000 + k}, {a + 1}, {b + 1}" for k, (a, b) in enumerate(zip(stiff[:-1], stiff[1:]))]
+    root = [i + 1 for i in range(len(X)) if X[i, 0] < 1e-9]
+    tip = [i + 1 for i in range(len(X)) if X[i, 0] > 100 - 1e-9]
+    L += ["*NSET, NSET=ROOT", ", ".join(map(str, root)), "*NSET, NSET=TIP", ", ".join(map(str, tip)),
+          "*MATERIAL, NAME=AL", "*ELASTIC", "70000., 0.33", "*SHELL SECTION, ELSET=PLATE, MATERIAL=AL", "2.0",
+          "*BEAM SECTION, ELSET=STIFF, MATERIAL=AL, SECTION=RECT", "4., 10.", "0., 1., 0.",
+          "*BOUNDARY", "ROOT, ENCASTRE", "*STEP", "*STATIC", "*CLOAD", "TIP, 3, 1.0", "TIP, 5, 10.0", "*END STEP"]
+    p = tmp_path / "sp.inp"
+    p.write_text("\n".join(L))
+    sp = read_inp_spec(str(p))
+    _, r1 = run_spec(sp, str(tmp_path), "a", verbose=False, write=False)
+    write_bdf(sp, str(tmp_path / "sp.bdf"))
+    sp2 = read_bdf(str(tmp_path / "sp.bdf"))
+    _, r2 = run_spec(sp2, str(tmp_path), "b", verbose=False, write=False)
+    U1, U2 = r1[0]["frames"][-1]["U"], r2[0]["frames"][-1]["U"]
+    assert np.abs(U1 - U2).max() < 1e-8 * np.abs(U1).max()

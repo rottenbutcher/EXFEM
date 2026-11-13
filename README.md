@@ -36,7 +36,7 @@ gfem gui --host 0.0.0.0            # serve the GUI from a GPU workstation / clou
 gfem run job.inp                   # Abaqus deck  (also .bdf/.nas Nastran, .cdb ANSYS)
 gfem convert job.inp job.bdf       # Abaqus <-> Nastran through the neutral model
 gfem mesh part.step -o part.inp --size 3
-python -m pytest tests             # 39 verification tests against analytical solutions
+python -m pytest tests             # 63 verification tests against analytical solutions
 ```
 
 | | |
@@ -62,6 +62,11 @@ python -m pytest tests             # 39 verification tests against analytical so
 
 **Elements**: C3D4, C3D10 (also M/H), C3D8 (F-bar anti-locking; R/H/I mapped), C3D8 full,
 C3D20, C3D20R, C3D6. Abaqus face numbering (S1..S6) is used for surfaces.
+Shells: S4/S4R/S3 (geometrically exact degenerated shell, finite rotations by the Rodrigues
+formula, MITC4 transverse shear, averaged directors with sharp folds, exact linearisation for
+small-displacement analyses). Beams: B31/B33 (geometrically exact Simo-Reissner, shear-locking
+free) with RECT, CIRC, PIPE, BOX, I and GENERAL sections. Shells and beams share nodes with each
+other and with solids.
 
 **Materials**: linear isotropic; orthotropic (engineering constants, material axes);
 St. Venant–Kirchhoff; Neo-Hookean, Mooney–Rivlin and Yeoh hyperelasticity; J2 plasticity with
@@ -73,7 +78,9 @@ large rotation); thermal expansion; Python user materials (`UserMaterial`).
 - Riks arc-length (Crisfield cylindrical) for snap-through and limit loads
 - Implicit dynamics (HHT-α / Newmark) and explicit dynamics (central difference, lumped mass, on-device `lax.scan`, mass scaling)
 - Modal: shift-invert Lanczos with participation factors and effective mass; pre-stress supported
-- Linear buckling (eigenvalue) with initial-stress stiffness
+- Linear buckling (eigenvalue) with initial-stress stiffness (solids, shells, beams)
+- Nonlinear post-buckling: eigenmode imperfection + Riks, verified against the elastica
+- Harmonic response by mode superposition (all frequencies in one vectorised kernel)
 - Steady and transient heat transfer (flux, convection, generation), with sequential thermal-stress coupling
 - SIMP topology optimisation (density filter, OC update) on unstructured CAD meshes
 - Batched multi-load-case linear solves (`optimize.multi_load_cases`)
@@ -81,20 +88,42 @@ large rotation); thermal expansion; Python user materials (`UserMaterial`).
 **Loads and constraints**: displacement (with amplitudes), concentrated force, pressure (dead or
 follower), surface traction, total force on a face, moment on a face, gravity, acceleration,
 centrifugal, temperature field; fixed support, frictionless support on any plane (MPC),
-bonded contact (dual-mortar tie), frictionless contact (augmented Lagrange, finer mesh
-automatically chosen as slave), rigid wall with prescribed motion.
+bonded contact (dual-mortar tie), frictionless and Coulomb frictional contact (augmented
+Lagrange normal, penalty-regularised stick / return-mapped slip, exact non-symmetric tangent with
+the direct solver; the finer mesh is automatically chosen as slave), rigid wall with prescribed
+motion, rigid remote points (remote displacement/rotation, 6 dof reference node), deformable
+remote force, bolt pretension (secant iteration to the target section force, then locked),
+simple supports and rotation boundary conditions for shells and beams.
 
 **Linear solvers**: sparse direct (SuperLU) • smoothed-aggregation AMG (PyAMG setup, V-cycle on
 the device with Chebyshev smoothing), reused across Newton iterations and rebuilt when PCG slows
 down • Jacobi-PCG • element-by-element stored tangents or fully matrix-free AD-JVP tangents.
 
+**GPU (NVIDIA CUDA) acceleration**
+| Workload | GPU path |
+|---|---|
+| Element force / tangent (all elements, all materials) | batched `vmap` kernels, XLA-compiled for CUDA |
+| Linear systems in Newton, Riks, HHT, topology optimisation | AMG-PCG with the V-cycle on the device |
+| GeForce / RTX / L4 / L40 (slow FP64) | `linear_solver="mixed"`: FP32 AMG-PCG + FP64 iterative refinement |
+| Sparse direct on the device | `linear_solver="gpu_direct"` (cuSOLVER via `jax.experimental.sparse`) |
+| Large modal / buckling | block LOBPCG + AMG on the device (`eigensolver="lobpcg"`, automatic for big models): no factorisation, memory linear in the model size |
+| Several GPUs | element operators sharded across all devices, SPMD mat-vecs with XLA/NCCL all-reduce |
+| Explicit dynamics | complete time loop inside `lax.scan` on the device |
+| Load envelopes / DOE | `multi_load_cases`: hundreds of load cases in one batched solve |
+| Frequency sweeps | harmonic response for all frequencies in one kernel |
+
+`examples/gpu_showcase.py --n 60` runs a multi-million-dof static, 20-mode modal, buckling and
+256-load-case study and prints timings for a CPU/GPU comparison.
+
 **CAD**: box, cylinder, sphere, cone, torus, wedge; sketch → extrude/revolve (polylines with
 arcs, circles, rectangles, slots, DXF import); boolean union/subtract/intersect; fillet and
 chamfer (edges selected in the viewer); move/rotate/mirror/scale/copy; linear and circular
-patterns; STEP/IGES/BREP import with unit conversion and healing; STL import; shared topology
-for conformal multi-body meshes; STEP/STL export.
+patterns; surface (sheet) and line (wire) bodies for shells and beams; STEP/IGES/BREP import with
+unit conversion and healing (surface-only files become sheet bodies); STL import; shared topology
+for conformal multi-body meshes (stringers embedded in skins stay beams); STEP/STL export.
 
-**Meshing**: gmsh tetrahedral (linear or quadratic), transfinite hex where possible, hex-dominant;
+**Meshing**: gmsh tetrahedral (linear or quadratic), transfinite hex where possible, hex-dominant,
+quad-dominant shells on sheet bodies, beams on line bodies;
 global, curvature and local face/edge/body sizing; quality statistics (SICN histogram).
 Every CAD body, face, edge and vertex keeps its identity as a node/element set and surface.
 
@@ -172,7 +201,13 @@ buckling (< 3%); free and constrained thermal expansion; Riks against load contr
 step-load dynamic factor; explicit dynamic factor; Abaqus and Nastran round trips; Nastran
 small-field and continuation parsing; ANSYS CDB; Abaqus parts/instances/contact pair; CAD
 STEP export and re-import; topological-naming repair; CAD-to-results stress; project builder
-for every analysis type.
+for every analysis type. Shells and beams: cantilever plate (quad and tri), curved strip vs
+analytic (< 1%), Scordelis-Lo roof (< 3%), beam roll-up into a full circle under an end moment,
+plate and column buckling (< 3% / < 1%), simply supported plate frequency (< 2%), elastica
+post-buckling (< 3%), harmonic static limit and resonance, explicit shell dynamic factor,
+Abaqus and Nastran shell/beam round trips. Connectors: friction ratio Rx/Rz = mu, rigid remote
+rotation, remote-force equilibrium, bolt pretension force. Device paths: LOBPCG vs Lanczos
+(modal, shell buckling), mixed/gpu_direct/AMG/Jacobi agreement, 4-device sharding.
 
 ## Architecture
 
@@ -185,7 +220,11 @@ gfem/constraints.py  MPC elimination, dual-mortar tie, symmetry, coupling
 gfem/contact.py      penalty / augmented-Lagrange contact, rigid wall
 gfem/loads.py        amplitudes, pressure/traction/force/moment/gravity/centrifugal, follower pressure
 gfem/linalg.py       PCG, AMG (device V-cycle), direct
-gfem/solvers.py      Static, Riks, Dynamic (HHT), Explicit, modal, buckling
+gfem/solvers.py      Static, Riks, Dynamic (HHT), Explicit, modal, buckling, post-buckling, harmonic
+gfem/structural.py   shells (MITC4) and beams (Simo-Reissner) with rotation rows
+gfem/connectors.py   remote points, remote force, bolt pretension
+gfem/eigen.py        device block LOBPCG for modal and buckling
+gfem/parallel.py     multi-GPU sharding
 gfem/thermal.py      heat transfer
 gfem/optimize.py     topology optimisation, batched load cases
 gfem/spec.py         neutral model shared by every front end
@@ -197,11 +236,15 @@ gfem/gui/            HTTP/SSE server, examples, browser front-end (three.js)
 ```
 
 ## Roadmap
-1. Friction (Coulomb, regularised stick) and self-contact
-2. Shells (S4R/S3) and beams (B31) for thin CAD parts; mid-surface extraction
-3. Remote points / bolt pretension / joints
+Done in 0.3: friction, shells, beams, remote points, bolt pretension, LOBPCG, mixed precision,
+device direct solver, multi-GPU operator sharding, post-buckling, harmonic response.
+1. Self-contact, shell-edge contact, beam contact
+2. Shell plasticity (through-thickness integration points), composite layups, S8R
+3. Automatic mid-surface extraction of thin solids; joints (revolute, spherical)
 4. Finite-strain multiplicative plasticity (log strain), viscoelasticity, damage
-5. Multi-GPU domain decomposition (`jax.sharding`), cuDSS direct solver, HDF5 results
-6. Parasolid / CATIA / NX native import (needs commercial translators); for now export STEP or IGES from those systems
+5. Element-kernel sharding across GPUs, cuDSS direct solver, HDF5 results
+6. Parasolid / CATIA / NX native files: these formats are proprietary and need licensed
+   translators, which an open-source package cannot ship. Save as STEP (AP203/214/242) or IGES
+   from those systems; STEP keeps solids, sheets and wires, which gfem imports directly.
 
 License: Apache-2.0

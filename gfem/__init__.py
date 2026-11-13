@@ -26,7 +26,7 @@ from .solvers import (Step, State, Monitor, StaticSolver, RiksSolver,       # no
 from .loads import Amplitude                                                # noqa: E402
 from . import mesh, constraints, contact, loads                             # noqa: E402
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def run_inp(path, outdir=".", verbose=True, monitor=None):

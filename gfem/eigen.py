@@ -92,7 +92,8 @@ def _amg_precond(model, ops, setup):
     amg = linalg.AMG(A, np.asarray(model.X), rot_mask=model.rot_mask() if model.rot_of else None)
     pre = amg.make()
     p = amg.params()
-    return jax.jit(jax.vmap(lambda r: pre(p, r), in_axes=1, out_axes=1)), amg
+    f = jax.jit(jax.vmap(lambda pp, r: pre(pp, r), in_axes=(None, 1), out_axes=1))
+    return (lambda R: f(p, R)), amg
 
 
 def _block_op(ops, setup, ndof, diag=None):
@@ -104,11 +105,12 @@ def _block_op(ops, setup, ndof, diag=None):
     free = setup.free
     tp = setup.tr.params()
 
-    def one(v):
-        w = t_apply(tp, free * v, ndof)
-        y = ops_matvec(ops, w, ndof) if ops is not None else diag * w
-        return free * t_apply_T(tp, y, ndof)
-    return jax.jit(jax.vmap(one, in_axes=1, out_axes=1))
+    def one(ops_, diag_, free_, tp_, v):
+        w = t_apply(tp_, free_ * v, ndof)
+        y = ops_matvec(ops_, w, ndof) if ops_ is not None else diag_ * w
+        return free_ * t_apply_T(tp_, y, ndof)
+    f = jax.jit(jax.vmap(one, in_axes=(None, None, None, None, 1), out_axes=1))
+    return lambda V: f(ops, diag, free, tp, V)
 
 
 def modal_lobpcg(model, step, state=None, monitor=None, tol=1e-6):

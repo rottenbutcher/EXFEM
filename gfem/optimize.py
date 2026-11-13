@@ -130,15 +130,14 @@ def multi_load_cases(model, step, cases, cg_tol=1e-8):
     d = ops_diagonal(ops, nd)
     inv = jnp.where(free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
 
-    def A(v):
-        w = t_apply(tp, free * v, nd)
-        return free * t_apply_T(tp, ops_matvec(ops, w, nd), nd) + (1 - free) * v
-
     @jax.jit
-    def solve_all(F):
+    def solve_all(F, ops, inv, free, tp):
+        def A(v):
+            w = t_apply(tp, free * v, nd)
+            return free * t_apply_T(tp, ops_matvec(ops, w, nd), nd) + (1 - free) * v
         return jax.vmap(lambda f: pcg(A, free * t_apply_T(tp, f, nd), lambda r: inv * r,
                                       tol=cg_tol, maxiter=20000)[0])(F)
-    U = solve_all(jnp.asarray(cases))
+    U = solve_all(jnp.asarray(cases), ops, inv, free, tp)
     if setup.tr.active:
         U = jax.vmap(setup.tr.apply)(U)
     return U
