@@ -36,7 +36,7 @@ gfem gui --host 0.0.0.0            # serve the GUI from a GPU workstation / clou
 gfem run job.inp                   # Abaqus deck  (also .bdf/.nas Nastran, .cdb ANSYS)
 gfem convert job.inp job.bdf       # Abaqus <-> Nastran through the neutral model
 gfem mesh part.step -o part.inp --size 3
-python -m pytest tests             # 63 verification tests against analytical solutions
+python -m pytest tests             # 72 verification tests against analytical solutions
 ```
 
 | | |
@@ -69,7 +69,7 @@ free) with RECT, CIRC, PIPE, BOX, I and GENERAL sections. Shells and beams share
 other and with solids.
 
 **Materials**: linear isotropic; orthotropic (engineering constants, material axes);
-St. Venant–Kirchhoff; Neo-Hookean, Mooney–Rivlin and Yeoh hyperelasticity; J2 plasticity with
+St. Venant–Kirchhoff; Neo-Hookean, Mooney–Rivlin, Yeoh, Arruda–Boyce and Gent hyperelasticity; J2 plasticity with
 tabular isotropic, linear kinematic or combined hardening, or Johnson–Cook (small strain and
 large rotation); thermal expansion; Python user materials (`UserMaterial`).
 
@@ -81,7 +81,11 @@ large rotation); thermal expansion; Python user materials (`UserMaterial`).
 - Linear buckling (eigenvalue) with initial-stress stiffness (solids, shells, beams)
 - Nonlinear post-buckling: eigenmode imperfection + Riks, verified against the elastica
 - Harmonic response by mode superposition (all frequencies in one vectorised kernel)
-- Steady and transient heat transfer (flux, convection, generation), with sequential thermal-stress coupling
+- Response spectrum (SRSS / CQC, any excitation direction) and random vibration (base-acceleration
+  PSD → 1σ RMS displacement and stress via a device modal covariance; verified against Miles)
+- Stress-life fatigue (Basquin S-N, endurance limit, Goodman / Gerber / Soderberg mean-stress
+  correction, fully reversed / zero-based / ratio loading): life, damage, fatigue safety factor
+- Steady and transient heat transfer (flux, convection, generation, surface-to-ambient radiation), with sequential thermal-stress coupling
 - SIMP topology optimisation (density filter, OC update) on unstructured CAD meshes
 - Batched multi-load-case linear solves (`optimize.multi_load_cases`)
 
@@ -93,7 +97,8 @@ Lagrange normal, penalty-regularised stick / return-mapped slip, exact non-symme
 the direct solver; the finer mesh is automatically chosen as slave), rigid wall with prescribed
 motion, rigid remote points (remote displacement/rotation, 6 dof reference node), deformable
 remote force, bolt pretension (secant iteration to the target section force, then locked),
-simple supports and rotation boundary conditions for shells and beams.
+simple supports and rotation boundary conditions for shells and beams, springs (axial, bushing,
+grounded), point masses, elastic (foundation) supports.
 
 **Linear solvers**: sparse direct (SuperLU) • smoothed-aggregation AMG (PyAMG setup, V-cycle on
 the device with Chebyshev smoothing), reused across Newton iterations and rebuilt when PCG slows
@@ -111,6 +116,18 @@ down • Jacobi-PCG • element-by-element stored tangents or fully matrix-free 
 | Explicit dynamics | complete time loop inside `lax.scan` on the device |
 | Load envelopes / DOE | `multi_load_cases`: hundreds of load cases in one batched solve |
 | Frequency sweeps | harmonic response for all frequencies in one kernel |
+
+**GPU bottlenecks removed**
+| Bottleneck | Fix |
+|---|---|
+| Atomic scatter-add in every K·v and internal-force assembly | precomputed gather-reduce plan (pure gather + row sum); faster on CPU too |
+| Mesh arrays baked into XLA programs as constants (slow compiles, duplicated GPU memory) | model arrays passed to every jitted kernel as runtime arguments |
+| Recompiling kernels on every run | persistent XLA compilation cache (`~/.cache/gfem/xla`) |
+| Host AMG setup stalls the GPU | setup in a background thread while the GPU iterates with a Chebyshev-Jacobi preconditioner; finest level always smoothed with the current tangent, so the hierarchy is reused through Newton |
+| Host contact search every Newton iteration | k-d tree only after real nodal motion; closest-candidate selection, gap and active set on the device |
+| Explicit dynamics building per-step BC arrays on the host | prescribed motion evaluated on the device inside `lax.scan` |
+| FP64 throughput on GeForce/RTX | mixed FP32/FP64 solver |
+| Factorisation memory in eigen analyses | LOBPCG (mat-vecs only) |
 
 `examples/gpu_showcase.py --n 60` runs a multi-million-dof static, 20-mode modal, buckling and
 256-load-case study and prints timings for a CPU/GPU comparison.

@@ -442,7 +442,7 @@ class Session:
         out = []
         for i, f in enumerate(self.frames):
             d = dict(i=i, time=f.get("time"), step=f.get("step"), procedure=f.get("procedure"))
-            for k in ("freq", "mode", "eigenvalue", "lpf", "compliance"):
+            for k in ("freq", "mode", "eigenvalue", "lpf", "compliance", "label"):
                 if k in f:
                     d[k] = f[k]
             if "U" in f:

@@ -160,6 +160,17 @@ class InpReader:
                 typ = str(p.get("TYPE", "ELEMENT")).upper()
                 rows = [(d[0].upper(), d[1].upper() if len(d) > 1 and d[1] else "") for d in data]
                 tgt.surfaces[name] = (typ, rows)
+            elif kw == "SPRING":
+                rows = [d for d in data if any(x for x in d)]
+                dofs = [int(_f(x)) for x in rows[0] if x] if len(rows) > 1 else []
+                k = _f(rows[-1][0])
+                kv = None
+                if dofs:
+                    kv = [0.0, 0.0, 0.0]
+                    kv[min(dofs[0], 3) - 1] = k
+                tgt.sections.append((p["ELSET"].upper(), "", dict(kind="spring", k=k, kvec=kv)))
+            elif kw == "MASS":
+                tgt.sections.append((p["ELSET"].upper(), "", dict(kind="mass", mass=_f(data[0][0]))))
             elif kw == "SOLID SECTION":
                 tgt.sections.append((p["ELSET"].upper(), p["MATERIAL"].upper()))
             elif kw == "SHELL SECTION":

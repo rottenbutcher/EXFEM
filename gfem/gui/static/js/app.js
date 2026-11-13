@@ -273,6 +273,7 @@ class App {
     let sub = `Type: ${this.state.result_types[r.type] || r.type}<br>Unit: ${esc(unit)}<br>Time: ${fmt(f.time)}`;
     if (f.freq !== undefined) sub = `Mode ${f.mode} · Frequency: ${fmt(f.freq)} Hz<br>(normalised mode shape)`;
     if (f.eigenvalue !== undefined) sub = `Mode ${f.mode} · Load multiplier: ${fmt(f.eigenvalue)}<br>(normalised mode shape)`;
+    if (f.label) sub = `Type: ${this.state.result_types[r.type] || r.type}<br>Unit: ${esc(unit)}<br>${esc(f.label)}`;
     if (!r.values) { L.innerHTML = `<div class="lg-title">${esc(name)}</div><div class="lg-sub">not available for this analysis</div>`; return; }
     const n = this.viewer.bands, cols = this.viewer.bandColors || [];
     let rows = "";
@@ -374,10 +375,10 @@ class App {
           <label>Order <select id="rb-morder"><option value="2">Quadratic</option><option value="1">Linear</option></select></label>
           <label>Method <select id="rb-mkind"><option value="tet">Tetrahedrons</option><option value="hex">Hex (sweepable)</option><option value="hexdom">Hex dominant</option></select></label>`),
       setup: G("Supports", B("c-fixed", "Fixed", "▼") + B("c-displacement", "Displacement", "↧") + B("c-frictionless", "Frictionless", "⊥") + B("c-simply_supported", "Simple sup.", "△") + B("c-remote_displacement", "Remote disp.", "⊙") + B("c-rigid_wall", "Rigid wall", "▬")) +
-        G("Connectors", B("c-remote_force", "Remote force", "⊕") + B("c-bolt_pretension", "Bolt preten.", "⚲")) +
+        G("Connectors", B("c-remote_force", "Remote force", "⊕") + B("c-bolt_pretension", "Bolt preten.", "⚲") + B("c-point_mass", "Point mass", "●") + B("c-elastic_support", "Elastic sup.", "≈")) +
         G("Loads", B("c-force", "Force", "➜") + B("c-pressure", "Pressure", "⇶") + B("c-moment", "Moment", "↻") + B("c-gravity", "Gravity", "⇓") +
           B("c-acceleration", "Accel.", "⇟") + B("c-rotational_velocity", "Rotation", "⟲") + B("c-body_temperature", "Thermal", "🌡")) +
-        G("Thermal", B("c-temperature", "Temperature", "T") + B("c-heat_flux", "Heat flux", "q") + B("c-convection", "Convection", "h") + B("c-heat_generation", "Heat gen.", "Q")) +
+        G("Thermal", B("c-temperature", "Temperature", "T") + B("c-heat_flux", "Heat flux", "q") + B("c-convection", "Convection", "h") + B("c-heat_generation", "Heat gen.", "Q") + B("c-radiation", "Radiation", "☼")) +
         G("Connections", B("k-bonded", "Bonded", "⇄") + B("k-frictionless", "Frictionless", "⇆") + B("k-frictional", "Frictional", "≋") + B("k-detect", "Detect", "⌖", "Detect contacting faces between bodies")) +
         G("Selection", B("ns-create", "Named sel.", "☰", "Create a named selection from the current selection")),
       solve: G("Analysis", `<select id="rb-atype" class="rbsel">${Object.entries(this.state?.analyses || {}).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>`) +
@@ -387,7 +388,7 @@ class App {
            <label>Solver <select id="rb-lsolver"><option value="auto">Program controlled</option><option value="direct">Direct (sparse LU)</option><option value="amg">Iterative AMG-PCG (GPU)</option><option value="jacobi">Iterative Jacobi-PCG</option></select></label>`),
       results: G("Deformation", B("r-total_deformation", "Total", "⇲") + B("r-deformation_x", "Dir. X", "x") + B("r-deformation_y", "Dir. Y", "y") + B("r-deformation_z", "Dir. Z", "z")) +
         G("Stress", B("r-von_mises", "Equivalent", "σ") + B("r-principal_max", "Max princ.", "σ₁") + B("r-principal_min", "Min princ.", "σ₃") + B("r-stress_xx", "Normal X", "σx") + B("r-tresca", "Intensity", "τ")) +
-        G("Other", B("r-peeq", "Plastic strain", "εp") + B("r-strain_eq", "Total strain", "ε") + B("r-temperature", "Temperature", "T") + B("r-safety_factor", "Safety factor", "SF") + B("r-density", "Topology", "◧")) +
+        G("Other", B("r-peeq", "Plastic strain", "εp") + B("r-strain_eq", "Total strain", "ε") + B("r-temperature", "Temperature", "T") + B("r-safety_factor", "Safety factor", "SF") + B("r-fatigue_life", "Fatigue life", "N") + B("r-fatigue_sf", "Fatigue SF", "SFf") + B("r-density", "Topology", "◧")) +
         G("Display", `<label>Scale <select id="rb-scale"><option value="auto">Auto</option><option value="0">Undeformed</option><option value="1">True scale</option><option value="10">10×</option><option value="100">100×</option><option value="1000">1000×</option></select></label>
           <label>Bands <select id="rb-bands"><option>5</option><option>7</option><option selected>9</option><option>12</option><option>16</option><option value="smooth">Smooth</option></select></label>
           <label class="chk"><input type="checkbox" id="rb-mesh"> Show mesh</label><label class="chk"><input type="checkbox" id="rb-undef"> Undeformed edges</label>`) +
@@ -596,6 +597,9 @@ class App {
     if (type === "remote_displacement") { c.point = null; c.components = [0, 0, 0]; c.rotations = [0, 0, 0]; }
     if (type === "remote_force") { c.point = null; c.vector = [0, -1000, 0]; c.moment = [0, 0, 0]; }
     if (type === "bolt_pretension") { c.value = 10000; c.axis = null; }
+    if (type === "point_mass") c.value = 0.001;
+    if (type === "elastic_support") c.value = 10;
+    if (type === "radiation") { c.emissivity = 0.8; c.ambient = 22; }
     if (type === "rigid_wall") { const bb = this.geom?.info?.bbox || [0, 0, 0, 1, 1, 1]; c.point = [0, bb[4] * 1.001, 0]; c.normal = [0, -1, 0]; c.motion = [0, -0.01 * (this.geom?.info?.diag || 1), 0]; }
     if (["temperature", "heat_flux", "convection", "heat_generation"].includes(type) && !p.analysis.type.startsWith("thermal")) {
       this.log("thermal boundary condition added – switch the analysis to Steady-State Thermal or Thermal-Stress to use it", "warn");
@@ -848,13 +852,16 @@ class App {
       rows.push({ label: "Custom", html: `<button data-addmat="1">Add custom material</button>` });
     } else if (kind === "material" && it) {
       title = `Details of "${it.name}"`; sec("Definition"); txt("Name", it, "name");
-      sel("Model", it, "model", [["linear", "Isotropic elasticity"], ["plastic", "Bilinear / multilinear J2 plasticity"], ["neohooke", "Neo-Hookean hyperelastic"], ["mooney", "Mooney-Rivlin hyperelastic"]]);
+      sel("Model", it, "model", [["linear", "Isotropic elasticity"], ["plastic", "Bilinear / multilinear J2 plasticity"], ["neohooke", "Neo-Hookean hyperelastic"], ["mooney", "Mooney-Rivlin hyperelastic"], ["arruda", "Arruda-Boyce hyperelastic"], ["gent", "Gent hyperelastic"]]);
+      if (it.model === "arruda" || it.model === "gent") { num("Shear modulus mu", it, "mu", u.stress); if (it.model === "arruda") num("Locking stretch", it, "lam_m"); else num("Jm", it, "Jm"); }
       rows.push({ label: "Color", html: `<input type="color" data-k="color" value="${it.color || "#8aa9c9"}">`, obj: it, key: "color", t: "txt" });
       sec("Elasticity"); num("Young's modulus", it, "E", u.stress); num("Poisson's ratio", it, "nu"); num("Density", it, "density", u.density);
       if (it.model === "plastic") { sec("Plasticity"); num("Yield strength", it, "yield", u.stress); num("Tangent modulus", it, "tangent", u.stress);
         rows.push({ label: "Hardening table (σy, εp per line)", html: `<textarea data-table="1" rows="3">${(it.table || []).map(r => r.join(", ")).join("\n")}</textarea>` }); }
       if (it.model === "neohooke") { sec("Hyperelastic (blank = from E, ν)"); num("C10", it, "C10", u.stress); num("D1", it, "D1", "1/" + u.stress); }
       if (it.model === "mooney") { sec("Hyperelastic"); num("C10", it, "C10", u.stress); num("C01", it, "C01", u.stress); num("D1", it, "D1", "1/" + u.stress); }
+      sec("Fatigue (S-N, Basquin)"); num("Ultimate strength", it, "ultimate", u.stress); num("Fatigue strength coeff. Sf'", it, "Sf", u.stress);
+      num("Fatigue strength exponent b", it, "b"); num("Endurance limit Se", it, "Se", u.stress);
       sec("Thermal"); num("Thermal expansion", it, "alpha", "1/°C"); num("Conductivity", it, "k", u.conductivity); num("Specific heat", it, "cp", u.cp);
       if (it.model !== "plastic") { sec("Strength"); num("Yield strength (safety factor)", it, "yield", u.stress); }
     } else if (kind === "mesh") {
@@ -890,6 +897,14 @@ class App {
       if (["modal", "buckling", "nonlinear_buckling", "harmonic"].includes(a.type)) { sec("Eigen solver"); num("Number of modes", a, "nmodes");
         sel("Eigen solver", a, "eigensolver", [["auto", "Program controlled"], ["lanczos", "Shift-invert Lanczos (host)"], ["lobpcg", "Block LOBPCG + AMG (GPU, large models)"]]); }
       if (a.type === "nonlinear_buckling") { sec("Imperfection / Riks"); num("Imperfection amplitude", a, "imperfection_scale", u.length, { ph: "auto" }); }
+      if (a.type === "response_spectrum" || a.type === "random_vibration") {
+        const key = a.type === "response_spectrum" ? "spectrum" : "psd";
+        sec(a.type === "response_spectrum" ? "Response spectrum" : "Base acceleration PSD");
+        rows.push({ label: a.type === "response_spectrum" ? "f [Hz], Sa per line" : `f [Hz], PSD [(${u.accel})²/Hz] per line`,
+          html: `<textarea data-tab2="${key}" rows="4">${(a[key] || (key === "spectrum" ? [[0.1, 9806.65], [100, 9806.65]] : [[20, 1e4], [2000, 1e4]])).map(r => r.join(", ")).join("\n")}</textarea>` });
+        vec("Excitation direction", a, "direction"); num("Damping ratio", a, "damping_ratio");
+        if (a.type === "response_spectrum") sel("Mode combination", a, "combination", [["SRSS", "SRSS"], ["CQC", "CQC"]]);
+      }
       if (a.type === "harmonic") { sec("Frequency range"); num("Min frequency", a, "fmin", "Hz"); num("Max frequency", a, "fmax", "Hz"); num("Solution intervals", a, "nfreq"); num("Damping ratio", a, "damping_ratio"); }
       if (a.type === "topopt") { const t = a.topopt; sec("Topology Optimization"); num("Retained volume fraction", t, "volfrac"); num("Penalty (SIMP p)", t, "penal"); num("Filter radius", t, "rmin", u.length, { ph: "auto" });
         num("Max iterations", t, "iters"); chk("Exclude loaded / supported elements", t, "keep_bc"); }
@@ -913,6 +928,9 @@ class App {
       if (t === "heat_generation") num("Internal heat generation", it, "value", u.gen);
       if (t === "remote_displacement") { vec("Remote point (blank = centroid)", it, "point", u.length); vec("Translations (blank = free)", it, "components", u.length); vec("Rotations (blank = free)", it, "rotations", "rad"); }
       if (t === "remote_force") { vec("Remote point (blank = centroid)", it, "point", u.length); vec("Force", it, "vector", u.force); vec("Moment", it, "moment", u.force + "·" + u.length); }
+      if (t === "point_mass") num("Mass", it, "value", u.mass);
+      if (t === "elastic_support") num("Foundation stiffness", it, "value", u.force + "/" + u.length + "³");
+      if (t === "radiation") { num("Emissivity", it, "emissivity"); num("Ambient temperature", it, "ambient", u.temp); }
       if (t === "bolt_pretension") { num("Pretension force", it, "value", u.force); vec("Bolt axis (blank = longest)", it, "axis"); }
       if (t === "displacement") vec("Rotations (shells/beams, blank = free)", it, "rotations", "rad");
       if (t === "rigid_wall") { vec("Wall point", it, "point", u.length); vec("Wall normal (into body)", it, "normal"); vec("Wall motion", it, "motion", u.length); num("Penalty factor", it, "fkn"); }
@@ -973,6 +991,9 @@ class App {
       else { const s = this.viewer.selection; if (s.dim !== 1 || !s.ids.size) return this.log("select edges first", "warn");
         it.edges = [...s.ids].map(i => this.geom.info.edges.find(e => e.id === i)?.sig).filter(Boolean); }
       await this.regenerate(); this.select({ kind: "feature", id: it.id }); });
+    D.querySelector("[data-tab2]")?.addEventListener("change", e => {
+      const rows2 = e.target.value.trim().split(/\n+/).map(l => l.split(/[,\s]+/).map(Number)).filter(r => r.length >= 2 && r.every(isFinite));
+      this.project.analysis[e.target.dataset.tab2] = rows2; this.push(); });
     D.querySelector("[data-dims]")?.addEventListener("change", e => { const pb = this.project.bodies[id];
       pb.dims = e.target.value.split(/[,\s]+/).map(Number).filter(isFinite); this.push(); this.renderTree(); });
     D.querySelector("[data-points]")?.addEventListener("change", async e => {

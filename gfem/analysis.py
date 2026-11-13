@@ -26,6 +26,21 @@ class BuildError(Exception):
     pass
 
 
+def _ElasticSupport(nodes, kv, name):
+    """Grounded springs with a different stiffness vector per node (foundation support)."""
+    import jax
+    import jax.numpy as jnp
+    from .discrete import GroundSpring
+    gs = GroundSpring(nodes, np.ones(3), name=f"elastic support {name}")
+    gs.kv = jnp.asarray(kv)
+    gs.init_state = lambda: gs.kv[:, None, :]           # per-element stiffness carried as state
+    eye = jnp.eye(3)
+    gs.force = jax.vmap(lambda Xe, ue, se, Te, sc: (se[0][None] * ue, se))
+    gs.stiff = jax.vmap(lambda Xe, ue, se, Te, sc: jnp.diag(se[0]))
+    gs.cauchy = jax.vmap(lambda Xe, ue, se, Te, scv=None: (jnp.diag(se[0] * ue[0]), 0.0, eye))
+    return gs
+
+
 def build(spec, log=print):
     X = np.asarray(spec.nodes)
     model = Model(X)
@@ -57,6 +72,8 @@ def build(spec, log=print):
     # blocks = (element type, material)
     keyed = {}
     for i, (t, mname) in enumerate(zip(types, emat)):
+        if mname is None and t in STRUCT_ELEMENTS and STRUCT_ELEMENTS[t].kind in ("spring", "mass") and esec[i] >= 0:
+            mname = "_none"
         if mname is None:
             continue
         if t in STRUCT_ELEMENTS:
@@ -70,6 +87,23 @@ def build(spec, log=print):
     for (ename, mname, t, si), idx in keyed.items():
         conn = np.array([conns[i] for i in idx])
         sec = spec.sections[si] if si >= 0 else {}
+        mats.setdefault("_none", None)
+        kind_ = STRUCT_ELEMENTS[t].kind if t in STRUCT_ELEMENTS else "solid"
+        if kind_ in ("spring", "mass"):
+            if kind_ == "mass":
+                for row in conn:
+                    model.add_point_mass([row[0]], float(sec.get("mass", 0.0)))
+                b = None
+            elif t == "SPRINGA":
+                b = model.add_spring(conn, float(sec.get("k", 0.0)), "axial", name=f"{t}:{si}")
+            else:
+                kv = np.asarray(sec.get("kvec") or [sec.get("k", 0.0)] * 3, float)
+                b = (model.add_ground_spring(conn[:, 0], kv, name=f"{t}:{si}") if t == "SPRING1"
+                     else model.add_spring(conn, kv, "bushing", name=f"{t}:{si}"))
+            if b is not None:
+                elem_block[idx] = len(model.blocks) - 1
+                elem_local[idx] = np.arange(len(idx))
+            continue
         if t in STRUCT_ELEMENTS and STRUCT_ELEMENTS[t].kind == "shell":
             if "thickness" not in sec:
                 raise BuildError(f"shell elements in {sec.get('elset')} need a shell section thickness")
@@ -141,6 +175,15 @@ def build(spec, log=print):
         slave = sl if len(sl) else getattr(sl, "node_only", None)
         model.add_interaction(PenaltyContact(X, ms, slave, E=Emod, fkn=c.get("fkn", 1.0), mu=c.get("mu", 0.0),
                                              augmented=c.get("augmented", True), name=c.get("name", "contact")))
+    for nodes, mval in getattr(spec, "point_masses", []):
+        model.add_point_mass(_nodes(model, spec, nodes), mval)
+    for sname, kf in getattr(spec, "elastic_supports", []):        # foundation: grounded springs
+        srf = _surf(model, sname)
+        w, _, _ = srf.integrate(np.asarray(model.X))
+        nn_ = np.nonzero(w > 0)[0]
+        nrm = srf.nodal_normals(np.asarray(model.X))[nn_]
+        kv = kf * w[nn_, None] * np.abs(nrm) + 1e-9 * kf * w[nn_, None]
+        model.blocks.append(_ElasticSupport(nn_, kv, sname))
     plan = [_build_step(model, spec, s, elem_block) for s in spec.steps]
     return model, plan
 
@@ -418,6 +461,23 @@ def run_spec(spec, outdir=".", base="job", verbose=True, monitor=None, write=Tru
             info = S.postbuckling(model, step, modes=tuple(im.get("modes", [1])), scale=im.get("scale"),
                                   monitor=rec, linear_solver=opts["linear_solver"])
             rec.frame(float(info["lpf"]), info["u"], model.init_state(), step=step.name, lpf=float(info["lpf"]))
+        elif kind in ("response_spectrum", "random_vibration"):
+            from . import vibration as V
+            sc = sp.get("spectrum", {})
+            fn = V.response_spectrum if kind == "response_spectrum" else V.random_vibration
+            kw = dict(direction=sc.get("direction", (0, 0, 1)), nmodes=sc.get("nmodes", 20),
+                      damping=sc.get("damping", 0.05), monitor=rec)
+            if kind == "response_spectrum":
+                kw["combination"] = sc.get("combination", "SRSS")
+            info = fn(model, step, sc["table"], **kw)
+            fr = dict(time=1.0, step=step.name, U=info["U"], S=info["S"], MISES=info["MISES"],
+                      label="1-sigma RMS" if kind == "random_vibration" else f"{kw.get('combination', 'SRSS')} combined")
+            rec.frames.clear()
+            if kind == "random_vibration":
+                mon.log(f"  random vibration: input {info['grms']:.4g} RMS, max 1-sigma |U| = "
+                        f"{np.linalg.norm(info['U'], axis=1).max():.4g}")
+            rec.frames.append(fr)
+            info = dict(freq=info["freq"], participation=info["participation"])
         elif kind == "harmonic":
             h = sp.get("harmonic", {})
             fr = np.linspace(h.get("fmin", 1.0), h.get("fmax", 1000.0), h.get("nfreq", 200))
@@ -440,12 +500,15 @@ def run_spec(spec, outdir=".", base="job", verbose=True, monitor=None, write=Tru
             fixed = [(n, T) for n, T in h["fixed"]]
             flux = [(_surf(model, sname), q) for sname, q in h["flux"]]
             film = [(_surf(model, sname), hh, Ti) for sname, hh, Ti in h["film"]]
+            rad = [(_surf(model, sname), em, Ta) for sname, em, Ta in h.get("radiation", [])]
+            sig = 5.670374419e-14 if (spec.units or "mm") == "mm" else 5.670374419e-8
             gen = {}
             for es, q in h["gen"]:
                 for bi in (_blocks_of(model, es) or range(len(model.blocks))):
                     gen[bi] = q
             tr = dict(time=step.T, dt=sp.get("dt_init"), frames=step.frames) if sp.get("transient") else None
-            Tcur = HeatTransfer(model).solve(fixed, flux, film, gen, T0=Tcur, transient=tr, monitor=rec)
+            Tcur = HeatTransfer(model).solve(fixed, flux, film, gen, T0=Tcur, transient=tr, monitor=rec,
+                                             radiation=rad, sigma=sig)
             state.T = None              # the next structural step ramps from its reference
             info = dict(T=Tcur)
         elif kind == "topopt":

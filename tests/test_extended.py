@@ -112,3 +112,21 @@ def test_new_hyperelastic_small_strain_limit(mat):
     u, s, _ = gfem.StaticSolver(m, verbose=False).solve(gfem.Step(bcs=bcs))
     sxx = float(m.stresses(u, s)[0]["S"][0, 0, 0])
     assert abs(sxx - 3 * mu * 1e-3) / (3 * mu * 1e-3) < 0.02     # E = 3 mu (incompressible)
+
+
+def test_springs_masses_from_decks(tmp_path):
+    from gfem.io.inp import read_inp_spec
+    from gfem.io.nastran import read_bdf
+    from gfem.analysis import run_spec
+    inp = tmp_path / "s.inp"
+    inp.write_text("\n".join(["*NODE", "1, 0, 0, 0", "2, 1, 0, 0", "*ELEMENT, TYPE=SPRINGA, ELSET=SP", "1, 1, 2",
+                              "*SPRING, ELSET=SP", "", "1000.", "*ELEMENT, TYPE=MASS, ELSET=M", "2, 2", "*MASS, ELSET=M", "2.5",
+                              "*BOUNDARY", "1, 1, 3", "2, 2, 3", "*STEP", "*FREQUENCY", "1,", "*END STEP"]))
+    _, r = run_spec(read_inp_spec(str(inp)), str(tmp_path), "a", verbose=False, write=False)
+    assert abs(r[0]["info"]["freq"][0] - np.sqrt(1000 / 2.5) / (2 * np.pi)) < 1e-6
+    bdf = tmp_path / "s.bdf"
+    bdf.write_text("\n".join(["SOL 101", "CEND", "SUBCASE 1", " SPC = 1", " LOAD = 2", "BEGIN BULK",
+                              "GRID,1,,0.,0.,0.", "GRID,2,,1.,0.,0.", "CELAS2,10,500.,1,1,2,1", "CONM2,20,2,,3.0",
+                              "SPC1,1,123,1", "SPC1,1,23,2", "FORCE,2,2,0,10.,1.,0.,0.", "ENDDATA"]))
+    _, r = run_spec(read_bdf(str(bdf)), str(tmp_path), "b", verbose=False, write=False)
+    assert abs(r[0]["frames"][-1]["U"][1, 0] - 10 / 500) < 1e-9

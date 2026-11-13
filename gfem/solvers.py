@@ -1031,10 +1031,17 @@ def modal(model, step, state=None, monitor=None):
         if setup.tr.active:
             M = (setup.tr.T.T @ sp.diags(M) @ setup.tr.T).diagonal()
         Mk = sp.diags(M[keep]).tocsc()
-        nm = min(step.nmodes, K.shape[0] - 2)
-        sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
-        mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
-        w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
+        if K.shape[0] <= max(step.nmodes + 2, 60):          # tiny systems: dense
+            import scipy.linalg as sla
+            nm = min(step.nmodes, K.shape[0])
+            w2, V = sla.eigh(K.toarray(), Mk.toarray())
+            w2, V = w2[:nm], V[:, :nm]
+            mon.log(f"  modal: {K.shape[0]} free dofs, dense eigensolver")
+        else:
+            nm = min(step.nmodes, K.shape[0] - 2)
+            sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
+            mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
+            w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
         order = np.argsort(w2)
         w2, V = w2[order], V[:, order]
         w2 = np.maximum(w2, 0.0)

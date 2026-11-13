@@ -100,6 +100,8 @@ ANALYSES = {
     "thermal_stress": "Thermal-Stress (coupled)", "topopt": "Topology Optimization",
     "nonlinear_buckling": "Nonlinear Buckling (imperfection + Riks)",
     "harmonic": "Harmonic Response (MSUP)",
+    "response_spectrum": "Response Spectrum (SRSS / CQC)",
+    "random_vibration": "Random Vibration (PSD)",
     "deck": "Solver deck steps (as imported)",
 }
 
@@ -120,6 +122,9 @@ CONDITIONS = {
     "remote_displacement": dict(label="Remote Displacement", group="support", dims=[1, 2]),
     "remote_force": dict(label="Remote Force", group="load", dims=[2]),
     "bolt_pretension": dict(label="Bolt Pretension", group="load", dims=[3]),
+    "point_mass": dict(label="Point Mass", group="load", dims=[0, 1, 2]),
+    "elastic_support": dict(label="Elastic Support", group="support", dims=[2]),
+    "radiation": dict(label="Radiation", group="thermal", dims=[2]),
     # thermal
     "temperature": dict(label="Temperature", group="thermal", dims=[0, 1, 2]),
     "heat_flux": dict(label="Heat Flux", group="thermal", dims=[2]),
@@ -136,6 +141,7 @@ RESULTS = {
     "tresca": "Stress Intensity (Tresca)", "peeq": "Equivalent Plastic Strain",
     "strain_eq": "Equivalent Total Strain", "temperature": "Temperature",
     "density": "Topology Density", "safety_factor": "Safety Factor",
+    "fatigue_life": "Fatigue Life (cycles)", "fatigue_damage": "Fatigue Damage", "fatigue_sf": "Fatigue Safety Factor",
 }
 
 
@@ -253,6 +259,8 @@ def build_spec(project, mesh_spec, info=None, log=print):
                 props["tangent"] = m.get("tangent", 0.0)
         if model == "neohooke" and m.get("C10"):
             props["C10"], props["D1"] = m["C10"], m.get("D1")
+        if model in ("arruda", "gent"):
+            props.update(mu=m.get("mu", m.get("E", 3.0) / 3), lam_m=m.get("lam_m", 7.0), Jm=m.get("Jm", 50.0))
         if model == "mooney":
             props["mooney"] = [m.get("C10", 0.5), m.get("C01", 0.1), m.get("D1", 0.0)]
         sp.materials[mid] = props
@@ -346,6 +354,14 @@ def build_spec(project, mesh_spec, info=None, log=print):
                 pt = sp.nodes[nodes].mean(0).tolist()
             st["dsloads"].append(dict(surface=surf, kind="REMOTE", vector=list(vec), point=list(pt),
                                       moment=c.get("moment")))
+        elif typ == "point_mass":
+            sp.point_masses = getattr(sp, "point_masses", []) + [(nodes, float(c.get("value", 0.0)))]
+        elif typ == "elastic_support":                 # foundation stiffness per unit area
+            surf = scope_surface(sp, dim, ids, name)
+            sp.elastic_supports = getattr(sp, "elastic_supports", []) + [(surf, float(c.get("value", 0.0)))]
+        elif typ == "radiation":
+            heat.setdefault("radiation", []).append((scope_surface(sp, dim, ids, name), float(c.get("emissivity", 0.8)),
+                                                     float(c.get("ambient", 22.0))))
         elif typ == "bolt_pretension":
             for b in ids:
                 es = f"BODY_{b}"
@@ -472,6 +488,15 @@ def build_spec(project, mesh_spec, info=None, log=print):
         st["imperfection"] = dict(modes=[int(x) for x in a.get("imperfection_modes", [1])],
                                   scale=a.get("imperfection_scale"))
         sp.steps.append(st)
+    elif kind in ("response_spectrum", "random_vibration"):
+        st["procedure"] = kind
+        tab = a.get("spectrum") if kind == "response_spectrum" else a.get("psd")
+        st["spectrum"] = dict(table=tab or ([[0.1, 9806.65], [100.0, 9806.65]] if kind == "response_spectrum"
+                                            else [[20.0, 1e4], [2000.0, 1e4]]),
+                              direction=a.get("direction", [0, 0, 1]), combination=a.get("combination", "SRSS"),
+                              damping=float(a.get("damping_ratio", 0.02 if kind == "random_vibration" else 0.05)),
+                              nmodes=int(a.get("nmodes", 20)))
+        sp.steps.append(st)
     elif kind == "harmonic":
         st["procedure"] = "harmonic"
         st["harmonic"] = dict(fmin=float(a.get("fmin", 1.0)), fmax=float(a.get("fmax", 1000.0)),
@@ -524,6 +549,18 @@ def result_field(frame, rtype, project=None):
         return frame["T"]
     if rtype == "density" and "density_nodal" in frame:
         return frame["density_nodal"]
+    if rtype.startswith("fatigue_") and S is not None:
+        from .fatigue import stress_life
+        mats = (project or {}).get("materials", [])
+        mf = next((m for m in mats if m.get("Sf")), mats[0] if mats else {})
+        Su = mf.get("ultimate", mf.get("yield", 400.0) * 1.5 if mf.get("yield") else 400.0)
+        r = stress_life(S, Su=Su, Sf=mf.get("Sf", 1.5 * Su), b=mf.get("b", -0.09), Se=mf.get("Se", 0.0),
+                        Sy=mf.get("yield"), loading=(project or {}).get("fatigue", {}).get("loading", "fully_reversed"),
+                        R=(project or {}).get("fatigue", {}).get("R", -1.0),
+                        mean=(project or {}).get("fatigue", {}).get("mean", "goodman"),
+                        scale=(project or {}).get("fatigue", {}).get("scale", 1.0),
+                        design_life=(project or {}).get("fatigue", {}).get("design_life", 1e7))
+        return {"fatigue_life": r["life"], "fatigue_damage": r["damage"], "fatigue_sf": r["safety_factor"]}[rtype]
     if rtype == "safety_factor" and "MISES" in frame:
         sy = None
         if project:
