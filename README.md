@@ -34,11 +34,17 @@ Install (CPU: jax, scipy, gmsh/OpenCASCADE, pyamg, ezdxf, meshio):
 pip install -e ".[all]"
 ```
 
-NVIDIA GPU (no code change):
+NVIDIA GPU on **Linux or WSL2** (no code change):
 
 ```bash
 pip install "jax[cuda12]"
 ```
+
+> **Windows:** JAX publishes CUDA wheels for Linux only. On native Windows `pip install "jax[cuda12]"`
+> silently falls back to an old CPU-only `jax` that does not match the installed `jaxlib`
+> ("jaxlib version ... is newer than and incompatible with jax"). On Windows either run CPU-only
+> (`pip install -U jax jaxlib`) or use the GPU inside WSL2 (Ubuntu): install the NVIDIA driver on
+> Windows, then run `pip install "jax[cuda12]"` and gfem inside WSL2. AMD `jax[rocm]` is Linux-only too.
 
 Start the GUI, then open http://127.0.0.1:8765 in a browser:
 
