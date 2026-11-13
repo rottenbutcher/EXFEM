@@ -13,6 +13,14 @@ import os as _os
 import jax
 
 jax.config.update("jax_enable_x64", True)
+# persistent XLA cache: element kernels / solvers compile once per machine, not once per run
+try:
+    _cache = _os.environ.get("GFEM_JAX_CACHE", _os.path.join(_os.path.expanduser("~"), ".cache", "gfem", "xla"))
+    _os.makedirs(_cache, exist_ok=True)
+    jax.config.update("jax_compilation_cache_dir", _cache)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.5)
+except Exception:  # noqa: BLE001
+    pass
 
 from .elements import (ELEMENTS, HEX8, HEX8_PLAIN, HEX20, HEX20R, TET4, TET10,   # noqa: E402
                        WEDGE6)

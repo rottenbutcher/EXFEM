@@ -14,7 +14,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from .model import ops_matvec, ops_diagonal, ops_assemble
+from .model import ops_matvec, ops_diagonal, ops_assemble, csr_values, csr_matvec, gather_matvec
 from .constraints import Transformation, t_apply, t_apply_T
 from .loads import Amplitude, FollowerPressure, pressure_vector, smooth_step
 from . import linalg
@@ -221,18 +221,30 @@ def _ramp(t, T):
     return min(max(t / T, 0.0), 1.0) if T > 0 else 1.0
 
 
+def _diag_any(ops, nd):
+    if isinstance(ops, dict) and "plan" in ops:
+        return ops_diagonal(ops["blocks"] + list(ops["rest"]), nd)
+    if isinstance(ops, dict):
+        p = ops["pat"]
+        d = jnp.sum(jnp.where(p["ell_cols"] == jnp.arange(nd)[:, None], ops["vals"], 0.0), axis=1)
+        return d + ops_diagonal(ops["rest"], nd)
+    return ops_diagonal(ops, nd)
+
+
 # ------------------------------------------------------------------ linear system machinery
 class _LinearSystem:
     """Solves (free T^T K T free + fixed I) x = b with the chosen back-end."""
 
     def __init__(self, model, method="auto", tangent="ebe", cg_tol=1e-9, cg_maxiter=20000,
-                 monitor=None, multi_gpu=True):
+                 monitor=None, multi_gpu=True, operator="auto"):
         self.m = model
         if method == "auto":
             gpu = jax.default_backend() != "cpu"
             method = "direct" if (model.ndof <= (20000 if gpu else 40000)) else "amg"
         self.method, self.tangent = method, tangent
         self.multi_gpu = multi_gpu
+        # device CSR operator (atomic-free, less memory traffic) - default on GPUs
+        self.operator = operator if operator != "auto" else "gather"
         self.cg_tol, self.cg_maxiter = cg_tol, cg_maxiter
         self.amg = None
         self.amg_iters0 = None
@@ -243,7 +255,12 @@ class _LinearSystem:
 
         def opA(ops, free, tp, jv, v):
             w = t_apply(tp, free * v, nd)
-            y = ops_matvec(ops, w, nd)
+            if isinstance(ops, dict) and "plan" in ops:      # EbE GEMV + atomic-free gather assembly
+                y = gather_matvec(ops["plan"], ops["blocks"], w, nd) + ops_matvec(ops["rest"], w, nd)
+            elif isinstance(ops, dict):                      # device CSR + remaining EbE ops
+                y = csr_matvec(ops["pat"], ops["vals"], w, nd) + ops_matvec(ops["rest"], w, nd)
+            else:
+                y = ops_matvec(ops, w, nd)
             if jv is not None:
                 y = y + jv(w)
             return free * t_apply_T(tp, y, nd) + (1 - free) * v
@@ -257,6 +274,8 @@ class _LinearSystem:
         pre = amg.make() if amg is not None else None
         tol, maxit = self.cg_tol, self.cg_maxiter
 
+        nd = m.ndof
+
         def run(ops, b, free, tp, pp, jvp_args):
             if jvp_args is None:
                 jv = None
@@ -267,7 +286,14 @@ class _LinearSystem:
             if kind == "jacobi":
                 M = lambda r: pp * r
             else:
-                M = lambda r: free * pre(pp, free * r) + (1 - free) * r
+                # fine level smoothed with the *current* tangent: the frozen hierarchy only
+                # supplies the coarse spaces, so it stays effective as the Newton tangent evolves
+                if jv is None:
+                    dg = _diag_any(ops, nd)
+                    dinv0 = jnp.where(free > 0, 1.0 / jnp.where(jnp.abs(dg) > 0, dg, 1.0), 1.0)
+                    M = lambda r: free * pre(pp, free * r, A, dinv0) + (1 - free) * r
+                else:
+                    M = lambda r: free * pre(pp, free * r) + (1 - free) * r
             return linalg.pcg(A, b, M, tol=tol, maxiter=maxit)
         f = jax.jit(run)
         self._jit = {k: v for k, v in self._jit.items() if k[0] != kind} if kind == "amg" else self._jit
@@ -288,7 +314,7 @@ class _LinearSystem:
         nd = self.m.ndof
         if self.amg is None or rebuild:
             t0 = time.time()
-            self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
+            self.amg = linalg.AMG(self.assemble(self._full_ops if isinstance(ops, dict) else ops, setup), np.asarray(self.m.X),
                                   rot_mask=self.m.rot_mask() if self.m.rot_of else None)
             self.mon.log(f"    {self.amg.info()} (mixed FP32/FP64)  setup {time.time() - t0:.2f}s")
             self._mixed_fn = None
@@ -336,6 +362,20 @@ class _LinearSystem:
         if self.multi_gpu and jax.device_count() > 1 and self.method not in ("direct", "gpu_direct"):
             from .parallel import shard_ops
             ops = shard_ops(ops)
+        elif self.operator == "gather" and self.method in ("amg", "jacobi", "mixed") and isinstance(ops, list) \
+                and len(ops) >= len(self.m.blocks) and self.m.blocks:
+            nb = len(self.m.blocks)
+            self._full_ops = ops
+            ops = dict(plan=self.m.gather(), blocks=list(ops[:nb]), rest=list(ops[nb:]))
+        elif self.operator == "csr" and self.method in ("amg", "jacobi") and jvp_args is None:
+            pat = self.m.csr()
+            nb = len(self.m.blocks)
+            if pat is not None and isinstance(ops, list) and len(ops) >= nb:
+                if not hasattr(self, "_jcsr"):
+                    self._jcsr = jax.jit(csr_values)
+                full = ops
+                ops = dict(pat=pat, vals=self._jcsr(pat, [K for _, K in ops[:nb]]), rest=list(ops[nb:]))
+                self._full_ops = full
         if self.method == "mixed" and jvp_args is None:
             return self._mixed(ops, b, setup, rebuild)
         if self.method == "gpu_direct":
@@ -348,13 +388,13 @@ class _LinearSystem:
             self.last_iters = 1
             return jnp.asarray(x)
         if self.method == "jacobi":
-            d = ops_diagonal(ops, self.m.ndof)
+            d = _diag_any(ops, self.m.ndof)
             pp = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
             x, k, rr = self._pcg_fn("jacobi")(ops, b, setup.free, tp, pp, jvp_args)
         else:
             if self.amg is None or rebuild:
                 t0 = time.time()
-                self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
+                self.amg = linalg.AMG(self.assemble(self._full_ops if isinstance(ops, dict) else ops, setup), np.asarray(self.m.X),
                                       rot_mask=self.m.rot_mask() if self.m.rot_of else None)
                 self.amg_iters0 = None
                 self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
@@ -387,21 +427,20 @@ class StaticSolver:
         X = m.X
         nd = m.ndof
 
-        @jax.jit
         def fint_all(u, s_old, fields, cps):
             f, s_new = m.internal_force(u, s_old, fields)
             for c, p in zip(inter, cps):
-                f = f + c.evaluate(X, u, p, nd)[0]
+                f = f + c.evaluate(m.X, u, p, nd)[0]
             return f, s_new
 
-        @jax.jit
         def tangent_ops(u, s_old, fields, cps):
             ops = m.stiffness_ops(u, s_old, fields) if tangent == "ebe" else []
             for c, p in zip(inter, cps):
-                ops.append(c.evaluate(X, u, p, nd)[1])
+                ops.append(c.evaluate(m.X, u, p, nd)[1])
             return ops
 
-        self._fint, self._ops = fint_all, tangent_ops
+        # model arrays are runtime arguments, not compile-time constants
+        self._fint, self._ops = m.jit(fint_all), m.jit(tangent_ops)
 
     # ---- helpers
     def _cps(self, u, lam=0.0):
@@ -823,13 +862,20 @@ class ExplicitSolver:
         T1 = setup.Tnew
         tp = tr.params()
 
+        bc_amp = jnp.asarray(setup.bc_amp)
+        bc_tgt = jnp.asarray(setup.target)
+        bc_u0 = jnp.asarray(setup.ustart)
+
         def one(carry, inp):
             u, v, s = carry
-            t, a_def, amps, tgt, cps, fs = inp
+            t, a_def, amps, avals, cps, fs = inp
+            # prescribed displacements evaluated on the device (no per-step host arrays)
+            ampv = jnp.concatenate([avals, jnp.zeros(1)])[jnp.maximum(bc_amp, 0)]
+            tgt = jnp.where(bc_amp < 0, bc_u0 + (bc_tgt - bc_u0) * a_def, bc_tgt * ampv)
             T = T0 + (T1 - T0) * a_def
             fint, sn = m.internal_force(u, s, dict(T=T))
             for ci, p in zip(inter, cps):
-                fint = fint + ci.evaluate(X, u, p, nd)[0]
+                fint = fint + ci.evaluate(m.X, u, p, nd)[0]
             fext = setup.fprev * (1 - a_def)
             for (k, g), a in zip(groups, amps):
                 fext = fext + g * a
@@ -845,13 +891,14 @@ class ExplicitSolver:
             vn = t_apply(tp, vn, nd) if tp is not None else vn
             return (un, vn, sn), None
 
-        @jax.jit
-        def chunk(u, v, s, ts, a_def, amps, tgts, cps, fs):
+        def chunk(u, v, s, ts, a_def, amps, avals, cps, fs):
             def body(cc, x):
-                t, ad, am, tg, f = x
-                return one(cc, (t, ad, am, tg, cps, f))
-            (u, v, s), _ = jax.lax.scan(body, (u, v, s), (ts, a_def, amps, tgts, fs))
+                t, ad, am, av_, f = x
+                return one(cc, (t, ad, am, av_, cps, f))
+            (u, v, s), _ = jax.lax.scan(body, (u, v, s), (ts, a_def, amps, avals, fs))
             return u, v, s
+
+        chunk = m.jit(chunk)
 
         t0 = time.time()
         done = 0
@@ -864,12 +911,11 @@ class ExplicitSolver:
             a_def = np.array([default(t, step.T) for t in ts])
             av = [[a(t) for a in setup.amps] for t in ts]
             amps = np.array([[ad if k < 0 else avi[k] for k, _ in groups] for ad, avi in zip(a_def, av)]).reshape(per, len(groups))
-            tg = np.stack([np.asarray(setup.prescribed(t)) for t in ts]) if setup.fixed.any() \
-                else np.zeros((per, nd))
+            avals = np.array(av, float).reshape(per, len(setup.amps))
             fs = np.array([[ad if k < 0 else avi[k] for _, k, _ in fol] for ad, avi in zip(a_def, av)]).reshape(per, len(fol))
             cps = [ci.params(X, u, float(a_def[0])) if ci.kind == "wall" else ci.params(X, u) for ci in inter]
             u, v, s = chunk(u, v, s, jnp.asarray(ts), jnp.asarray(a_def), jnp.asarray(amps),
-                            jnp.asarray(tg), cps, jnp.asarray(fs))
+                            jnp.asarray(avals), cps, jnp.asarray(fs))
             done += per
             tcur = min(done, nsteps) * dt
             ke = 0.5 * float(jnp.sum(M * v * v))

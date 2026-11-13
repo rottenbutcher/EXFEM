@@ -52,9 +52,8 @@ def topology_optimization(model, step, volfrac=0.4, penal=3.0, rmin=None, iters=
     fext = setup.fext(step.T)
     up = setup.prescribed(step.T)
     zero_s = m.init_state()
-    ops_fn = jax.jit(lambda sc: m.stiffness_ops(jnp.zeros(m.ndof), zero_s, dict(T=None, scale=sc)))
+    ops_fn = m.jit(lambda sc: m.stiffness_ops(jnp.zeros(m.ndof), zero_s, dict(T=None, scale=sc)))
 
-    @jax.jit
     def energies(u):
         U = u.reshape(-1, 3)
         out = []
@@ -62,6 +61,7 @@ def topology_optimization(model, step, volfrac=0.4, penal=3.0, rmin=None, iters=
             fe, _ = b.force(m.X[b.conn], U[b.conn], s, jnp.zeros(b.conn.shape + (2,)), jnp.concatenate([jnp.ones((b.ne, 1)), jnp.zeros((b.ne, 9))], 1))
             out.append(jnp.einsum("eai,eai->e", fe, U[b.conn]))
         return jnp.concatenate(out)
+    energies = m.jit(energies)
 
     hist = []
     t0 = time.time()

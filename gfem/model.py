@@ -176,6 +176,81 @@ def ops_assemble(ops, ndof):
     return A
 
 
+def csr_pattern(dofs_list, ndof):
+    """Static CSR pattern for element blocks: element matrix entries (all blocks, flattened)
+    are permuted so that a *sorted* segment-sum produces the CSR values directly - an
+    atomic-free GPU assembly. Returns device arrays perm, seg, rows, cols and nnz."""
+    r_all, c_all = [], []
+    for d in dofs_list:
+        d = np.asarray(d, dtype=np.int64)
+        nd = d.shape[1]
+        r_all.append(np.repeat(d, nd, axis=1).ravel())
+        c_all.append(np.tile(d, (1, nd)).ravel())
+    r, c = np.concatenate(r_all), np.concatenate(c_all)
+    key = r * ndof + c
+    perm = np.argsort(key, kind="stable")
+    ks = key[perm]
+    first = np.ones(len(ks), bool)
+    first[1:] = ks[1:] != ks[:-1]
+    seg = np.cumsum(first) - 1
+    uk = ks[first]
+    rows, cols = uk // ndof, uk % ndof
+    # ELLPACK layout: every row padded to the max row length -> the mat-vec is a pure gather
+    # + row reduction (no scatter / atomics, coalesced on GPUs)
+    cnt = np.bincount(rows, minlength=ndof)
+    w = int(cnt.max()) if len(cnt) else 1
+    start = np.concatenate([[0], np.cumsum(cnt)[:-1]])
+    pos = rows * w + (np.arange(len(rows)) - start[rows])
+    ell_cols = np.repeat(np.arange(ndof), w)
+    ell_cols[pos] = cols
+    return dict(perm=jnp.asarray(perm.astype(np.int32 if len(perm) < 2**31 else np.int64)),
+                seg=jnp.asarray(seg.astype(np.int32)), rows=jnp.asarray(rows.astype(np.int32)),
+                cols=jnp.asarray(cols.astype(np.int32)), ell_pos=jnp.asarray(pos.astype(np.int64)),
+                ell_cols=jnp.asarray(ell_cols.astype(np.int32).reshape(ndof, w)))
+
+
+def csr_values(pattern, Ks):
+    """Element matrices -> ELL values (ndof, w): one sorted segment-sum per tangent."""
+    flat = jnp.concatenate([K.reshape(-1) for K in Ks])
+    v = jax.ops.segment_sum(flat[pattern["perm"]], pattern["seg"], num_segments=pattern["rows"].shape[0],
+                            indices_are_sorted=True)
+    E = pattern["ell_cols"]
+    return jnp.zeros(E.size, v.dtype).at[pattern["ell_pos"]].set(v, unique_indices=True).reshape(E.shape)
+
+
+def csr_matvec(pattern, vals, v, ndof):
+    return jnp.sum(vals * v[pattern["ell_cols"]], axis=1)
+
+
+def gather_plan(conns, nn):
+    """Atomic-free assembly plan: for every node the list of (element, local node) slots that
+    contribute to it, padded to the max valence. Element-level results (ne, nnode, 3) are
+    summed with a pure gather + reduction instead of a scatter-add."""
+    slots, nodes = [], []
+    off = 0
+    for c in conns:
+        c = np.asarray(c)
+        nodes.append(c.ravel())
+        slots.append(off + np.arange(c.size))
+        off += c.size
+    nodes, slots = np.concatenate(nodes), np.concatenate(slots)
+    order = np.argsort(nodes, kind="stable")
+    nodes, slots = nodes[order], slots[order]
+    cnt = np.bincount(nodes, minlength=nn)
+    vmax = max(int(cnt.max()), 1)
+    start = np.concatenate([[0], np.cumsum(cnt)[:-1]])
+    pos = np.arange(len(nodes)) - start[nodes]
+    g = np.full((nn, vmax), off, np.int64)                 # sentinel -> zero row
+    g[nodes, pos] = slots
+    return jnp.asarray(g.astype(np.int32 if off < 2**31 else np.int64))
+
+
+def gather_matvec(plan, ops, v, ndof):
+    parts = [jnp.einsum("eij,ej->ei", K, v[d]).reshape(-1, 3) for d, K in ops]
+    ys = jnp.concatenate(parts + [jnp.zeros((1, 3), v.dtype)])
+    return jnp.sum(ys[plan], axis=1).reshape(-1)
+
+
 class Model:
     def __init__(self, nodes):
         self.X = jnp.asarray(np.asarray(nodes, dtype=np.float64))
@@ -272,6 +347,63 @@ class Model:
     def init_state(self):
         return [b.init_state() for b in self.blocks]
 
+    # ---------- passing model data as jit *arguments* (no large baked-in constants) ----------
+    def data(self):
+        return dict(X=self.X, conn=[b.conn for b in self.blocks], plan=self.gather(),
+                    T0=jnp.zeros(self.nn) if self.T0 is None else jnp.asarray(self.T0))
+
+    def bound(self, data):
+        model = self
+
+        class _Bind:
+            def __enter__(self_):
+                self_.saved = (model.X, [b.conn for b in model.blocks], getattr(model, "_gather", None), model.T0)
+                model.X = data["X"]
+                for b, c in zip(model.blocks, data["conn"]):
+                    b.conn = c
+                model._gather = data["plan"]
+                model._gather_lock = True
+                model.T0 = data["T0"]
+
+            def __exit__(self_, *exc):
+                X, conns, g, T0 = self_.saved
+                model.X = X
+                for b, c in zip(model.blocks, conns):
+                    b.conn = c
+                model._gather = g
+                model._gather_lock = False
+                model.T0 = T0
+        return _Bind()
+
+    def jit(self, fn):
+        """jit `fn(*args)` with the model arrays passed as runtime arguments."""
+        model = self
+
+        @jax.jit
+        def g(data, *args):
+            with model.bound(data):
+                return fn(*args)
+        return lambda *args: g(model.data(), *args)
+
+    def gather(self):
+        if getattr(self, "_gather_lock", False):
+            return self._gather
+        key = (self.nn, len(self.blocks))
+        if getattr(self, "_gather_key", None) != key:
+            self._gather = gather_plan([np.asarray(b.conn) for b in self.blocks], self.nn)
+            self._gather_key = key
+        return self._gather
+
+    def csr(self):
+        """Cached device CSR pattern of all element blocks (None for very large models,
+        where the element-by-element operator is used instead)."""
+        key = (self.ndof, len(self.blocks))
+        if getattr(self, "_csr_key", None) != key:
+            tot = sum(b.ne * (b.dofs().shape[1] ** 2) for b in self.blocks)
+            self._csr = csr_pattern([b.dofs() for b in self.blocks], self.ndof) if tot < 4e8 else None
+            self._csr_key = key
+        return self._csr
+
     @property
     def nelem(self):
         return sum(b.ne for b in self.blocks)
@@ -299,13 +431,15 @@ class Model:
     def internal_force(self, u, states, fields=None):
         T, sc = self._fields(fields)
         U = u.reshape(-1, 3)
-        f = jnp.zeros_like(U, dtype=self.X.dtype)
-        new = []
+        new, parts = [], []
         for b, s, c in zip(self.blocks, states, sc):
             fe, sn = b.force(self.X[b.conn], U[b.conn], s, T[b.conn], c)
-            f = f.at[b.conn].add(fe)
+            parts.append(fe.reshape(-1, 3))
             new.append(sn)
-        return f.reshape(-1), new
+        if not parts:
+            return jnp.zeros(self.ndof), new
+        ys = jnp.concatenate(parts + [jnp.zeros((1, 3), parts[0].dtype)])
+        return jnp.sum(ys[self.gather()], axis=1).reshape(-1), new     # atomic-free assembly
 
     def element_stiffness(self, u, states, fields=None):
         T, sc = self._fields(fields)
