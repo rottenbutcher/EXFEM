@@ -785,7 +785,7 @@ class AnthropicBackend(_Backend):
     _FALLBACK_OK = ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
 
     def __init__(self, system, user_content, model, api_key=None, effort="high", base_url=None,
-                 max_tokens=32000, client=None):
+                 max_tokens=32000, client=None, extra_tools=()):
         if client is None:
             try:
                 import anthropic
@@ -801,7 +801,8 @@ class AnthropicBackend(_Backend):
         self.max_tokens = max_tokens
         self.system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         self.tools = [{"name": TOOL_NAME, "description": TOOL_DESCRIPTION, "input_schema": TOOL_SCHEMA,
-                       "eager_input_streaming": True}]
+                       "eager_input_streaming": True}] + [
+            {"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in extra_tools]
         self.messages = [{"role": "user", "content": user_content}]
         self.usage = dict(input=0, output=0, cache_read=0)
         self._eager = True
@@ -911,7 +912,8 @@ class AnthropicBackend(_Backend):
 class OpenAIBackend(_Backend):
     """GPT (or any OpenAI-compatible server) through the official SDK: Chat Completions + function tool."""
 
-    def __init__(self, system, user_content, model, api_key=None, effort="high", base_url=None, client=None):
+    def __init__(self, system, user_content, model, api_key=None, effort="high", base_url=None, client=None,
+                 extra_tools=()):
         if client is None:
             try:
                 import openai
@@ -925,7 +927,9 @@ class OpenAIBackend(_Backend):
         self.model = model
         self.effort = effort if effort in ("low", "medium", "high") else ("high" if effort else None)
         self.tools = [{"type": "function", "function": {"name": TOOL_NAME, "description": TOOL_DESCRIPTION,
-                                                        "parameters": TOOL_SCHEMA}}]
+                                                        "parameters": TOOL_SCHEMA}}] + [
+            {"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                              "parameters": t["inputSchema"]}} for t in extra_tools]
         self.messages = [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
         self.usage = dict(input=0, output=0, cache_read=0)
         self._images = True
@@ -1039,6 +1043,8 @@ class ScriptedBackend(_Backend):
                 on_text(t)
             return [t], [], "end_turn"
         self._n += 1
+        if isinstance(t, dict) and "tool" in t:              # any tool: {"tool": name, "args": {...}}
+            return [], [ToolCall(f"call{self._n}", t["tool"], t.get("args") or {})], "tool_use"
         args = t if isinstance(t, dict) and "features" in t else dict(features=t)
         return [], [ToolCall(f"call{self._n}", TOOL_NAME, args)], "tool_use"
 
@@ -1060,7 +1066,7 @@ def describe_features(features):
 
 
 def make_backend(provider, user_content_text, attachments=(), model=None, api_key=None, effort="high",
-                 base_url=None, client=None, system=SYSTEM_PROMPT):
+                 base_url=None, client=None, system=SYSTEM_PROMPT, extra_tools=()):
     provider = provider or "anthropic"
     if provider not in PROVIDERS:
         raise AIError(f"unknown provider {provider!r}; use one of claude-cli, codex-cli, {', '.join(sorted(PROVIDERS))}")
@@ -1072,11 +1078,13 @@ def make_backend(provider, user_content_text, attachments=(), model=None, api_ke
                       f"or save one (GUI: AI CAD > Settings, CLI: gfem ai --set-key {provider})")
     if provider == "anthropic":
         return AnthropicBackend(system, AnthropicBackend.content(user_content_text, attachments), model,
-                                api_key=api_key, effort=effort, base_url=base_url or None, client=client)
+                                api_key=api_key, effort=effort, base_url=base_url or None, client=client,
+                                extra_tools=extra_tools)
     if provider == "compatible" and not base_url:
         raise AIError("an OpenAI-compatible server needs a base URL (e.g. http://localhost:11434/v1 for Ollama)")
     return OpenAIBackend(system, OpenAIBackend.content(user_content_text, attachments), model,
-                         api_key=api_key, effort=effort, base_url=base_url or None, client=client)
+                         api_key=api_key, effort=effort, base_url=base_url or None, client=client,
+                         extra_tools=extra_tools)
 
 
 def build_request(prompt, base_features=None, units="mm"):
@@ -1091,8 +1099,9 @@ def build_request(prompt, base_features=None, units="mm"):
 
 
 def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=None, on_build=None,
-              should_stop=None, base_features=None):
-    """Drive the tool loop. log(str) receives progress lines, on_build(report) every build."""
+              should_stop=None, base_features=None, sim=None, on_sim=None):
+    """Drive the tool loop. log(str) receives progress lines, on_build(report) every build.
+    sim: an `ai_sim.SimTools` -> the simulation tools are executed too (simulation mode)."""
     log = log or (lambda s: None)
     best, builds, texts = None, 0, []
     t0 = time.time()
@@ -1114,6 +1123,18 @@ def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=
             break
         results = []
         for c in calls:
+            if sim is not None and c.name in _SIM_NAMES:
+                from .ai_cli import describe_sim
+                try:
+                    r, err = sim.call(c.name, c.args), None
+                except Exception as e:  # noqa: BLE001
+                    r, err = None, f"{type(e).__name__}: {e}"
+                d = dict(tool=c.name, args=c.args, result=r, error=err)
+                log("AI: " + describe_sim(d))
+                if on_sim:
+                    on_sim(d)
+                results.append((c, "ERROR: " + err if err else json.dumps(r, default=float), None, bool(err)))
+                continue
             if c.name != TOOL_NAME:
                 results.append((c, f"unknown tool {c.name}; the only tool is {TOOL_NAME}", None, True))
                 continue
@@ -1127,6 +1148,10 @@ def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=
             rep = evaluate(feats, units=u, render=visual)
             rep["name"] = c.args.get("name") or (best or {}).get("name") or "AI part"
             nf = len(feats) if isinstance(feats, list) else 0
+            if rep["ok"] and sim is not None:
+                stale = sim.set_geometry(rep["features"], units=u, name=rep["name"])
+                rep["warnings"] = list(rep["warnings"]) + ["project geometry updated; call get_model for face ids before adding conditions"] + (
+                    [f"conditions {stale} no longer match any face: remove and re-add them"] if stale else [])
             if rep["ok"]:
                 best = rep
                 log(f"AI: build {builds}: {nf} features -> {len(rep['bodies'])} body(ies), "
@@ -1144,14 +1169,21 @@ def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=
                    units=(best or {}).get("units", units), summary="\n".join(texts[-1:]).strip(),
                    report=best, png=(best or {}).get("png"), builds=builds,
                    usage=getattr(backend, "usage", None), seconds=round(time.time() - t0, 2))
-    if best is None:
+    if sim is not None:
+        res["project"] = sim.p
+        if sim.p["geometry"]["features"]:
+            res["ok"], res["features"] = True, sim.p["geometry"]["features"]
+    if not res["ok"]:
         res["error"] = "the model did not produce a valid geometry"
     return res
 
 
+_SIM_NAMES = {"get_model", "set_material", "add_condition", "remove_condition", "set_analysis", "set_mesh", "solve"}
+
+
 def generate(prompt, provider=None, model=None, api_key=None, base_url=None, effort=None, attachments=(),
              base_features=None, units="mm", max_turns=None, visual=None, log=None, on_text=None,
-             on_build=None, should_stop=None, client=None, backend=None, run_dir=None):
+             on_build=None, should_stop=None, client=None, backend=None, run_dir=None, project=None, on_sim=None):
     """One-call text-to-CAD. Missing options come from the saved settings.
     provider: 'claude-cli' / 'codex-cli' (signed-in account, no key), 'anthropic' / 'openai' /
     'compatible' (API key or local server)."""
@@ -1164,7 +1196,7 @@ def generate(prompt, provider=None, model=None, api_key=None, base_url=None, eff
         return run_cli(provider, prompt, attachments=attachments, base_features=base_features, units=units,
                        model=model, effort=effort or s.get("effort") or None,
                        visual=s.get("visual", True) if visual is None else visual, log=log, on_build=on_build,
-                       should_stop=should_stop, run_dir=run_dir)
+                       should_stop=should_stop, run_dir=run_dir, project=project, on_sim=on_sim)
     if model is None and provider == s.get("provider"):
         model = s.get("model") or None             # the saved model belongs to the saved provider
     effort = effort or s.get("effort") or "high"
@@ -1174,13 +1206,29 @@ def generate(prompt, provider=None, model=None, api_key=None, base_url=None, eff
     max_turns = int(max_turns or s.get("max_turns") or 10)
     atts = [a if isinstance(a, dict) else load_attachment(a) for a in attachments]
     text = build_request(prompt, base_features, units)
+    sim = None
+    if project is not None:
+        import tempfile
+        from .ai_sim import SimTools, SIM_TOOLS, SIM_GUIDE
+        from .. import project as P
+        rd = run_dir or tempfile.mkdtemp(prefix="gfem_ai_")
+        os.makedirs(rd, exist_ok=True)
+        pp = os.path.join(rd, "project.gfem.json")
+        P.save(project, pp)
+        sim = SimTools(pp, workdir=os.path.join(rd, "sim_work"))
+        text = SIM_GUIDE.format(library=", ".join(m["name"] for m in P.LIBRARY)) + "\n\n" + text
     if backend is None:
         if provider in ("claude-cli", "codex-cli"):        # a client object was given: use the API path
             provider = "anthropic" if provider == "claude-cli" else "openai"
+        system = SYSTEM_PROMPT + ("\n\n# Simulation\nYou also set up and solve the analysis with the simulation "
+                                  "tools (get_model, set_material, add_condition, set_analysis, set_mesh, solve), "
+                                  "following the simulation workflow in the request." if sim else "")
         backend = make_backend(provider, text, atts, model=model, api_key=api_key or api_key_for(provider, s),
-                               effort=effort, base_url=base_url or None, client=client)
-    return run_agent(backend, units=units, max_turns=max_turns, visual=visual, log=log, on_text=on_text,
-                     on_build=on_build, should_stop=should_stop, base_features=base_features)
+                               effort=effort, base_url=base_url or None, client=client, system=system,
+                               extra_tools=SIM_TOOLS if sim else ())
+    return run_agent(backend, units=units, max_turns=max_turns * (3 if sim else 1), visual=visual, log=log,
+                     on_text=on_text, on_build=on_build, should_stop=should_stop, base_features=base_features,
+                     sim=sim, on_sim=on_sim)
 
 
 def api_key_for(provider, settings=None):

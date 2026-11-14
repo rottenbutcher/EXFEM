@@ -145,6 +145,7 @@
         <div class="ai-mode">
           <label class="chk"><input type="radio" name="ai-mode" value="new" checked> New part</label>
           <label class="chk"><input type="radio" name="ai-mode" value="modify"> Modify current geometry</label>
+          <label class="chk" title="The model also assigns materials, supports and loads, meshes, solves and checks the results (signed-in account or API key)"><input type="radio" name="ai-mode" value="simulate"> Simulate (geometry + analysis)</label>
         </div>
         <textarea id="ai-prompt" spellcheck="false" placeholder="e.g. Flange: outer diameter 120 mm, thickness 15 mm, central hub d60 x 40 high with a d30 bore, 6 bolt holes d11 on a d95 circle, 2 mm fillets where the hub meets the flange."></textarea>
         <div class="ai-chips" id="ai-chips"></div>

@@ -158,8 +158,13 @@ def logout(provider):
 
 
 # ================================================================== run
-def _mcp_cmd(run_dir, units, base_file, visual):
+SIM_TOOL_NAMES = ["get_model", "set_material", "add_condition", "remove_condition", "set_analysis", "set_mesh", "solve"]
+
+
+def _mcp_cmd(run_dir, units, base_file, visual, project=None):
     args = ["-m", "gfem.cad.mcp_server", "--run-dir", run_dir, "--units", units]
+    if project:
+        args += ["--project", project]
     if base_file:
         args += ["--base", base_file]
     if not visual:
@@ -177,26 +182,41 @@ or run shell commands; the build_cad result (measurements + rendered views) is h
 work. Finish with a short summary of the part."""
 
 
+CLI_SIM_PROMPT = """{system}
+
+You are running inside gfem as a simulation engineer. Use ONLY the tools of the "gfem" MCP server:
+`cad_guide` (read it first: geometry AND simulation reference), `get_model`, `build_cad`,
+`set_material`, `add_condition`, `remove_condition`, `set_analysis`, `set_mesh` and `solve`.
+Do not write files or run shell commands. Workflow: build or keep the geometry, get_model (face ids,
+normals, centres), materials, supports and loads on the right faces (check the faces each call
+selected), analysis type, solve, judge the numbers against the request (and engineering sense:
+units mm-N-MPa), iterate if a requirement is not met. Finish with a short report: setup, key
+results (max deformation, max stress, safety factor, frequencies ...) and whether the
+requirements are met."""
+
+
 def _toml_str(s):
     return json.dumps(s)                                # a JSON string is a valid TOML basic string
 
 
 def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, model=None, effort=None,
-                  visual=True, images=()):
-    """-> (argv, stdin_text|None, env)"""
+                  visual=True, images=(), project=None):
+    """-> (argv, stdin_text|None, env). With `project` the simulation tools are enabled."""
     x = exe(provider)
     if not x:
         raise AIError(f"{CLIS[provider]['exe']} is not installed: {status(provider)['install']}")
-    py, margs, menv = _mcp_cmd(run_dir, units, base_file, visual)
+    py, margs, menv = _mcp_cmd(run_dir, units, base_file, visual, project)
+    template = CLI_SIM_PROMPT if project else CLI_PROMPT
+    tools = ["build_cad", "cad_guide", "current_model"] + (SIM_TOOL_NAMES if project else [])
     env = dict(os.environ)
     if provider == "claude-cli":
         cfg = os.path.join(run_dir, "mcp.json")
         with open(cfg, "w", encoding="utf-8") as f:
             json.dump({"mcpServers": {"gfem": {"type": "stdio", "command": py, "args": margs, "env": menv}}}, f)
         argv = [x, "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
-                "--system-prompt", CLI_PROMPT.format(system=SYSTEM_PROMPT),
+                "--system-prompt", template.format(system=SYSTEM_PROMPT),
                 "--tools", "", "--mcp-config", cfg, "--strict-mcp-config",
-                "--allowedTools", "mcp__gfem__build_cad", "mcp__gfem__cad_guide", "mcp__gfem__current_model",
+                "--allowedTools", *[f"mcp__gfem__{t}" for t in tools],
                 "--no-session-persistence", "--setting-sources", ""]
         if model:
             argv += ["--model", model]
@@ -241,23 +261,63 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
             paths.append(p)
     for p in paths:
         argv += ["-i", p]
-    full = CLI_PROMPT.format(system=SYSTEM_PROMPT) + "\n\n" + prompt_text
+    full = template.format(system=SYSTEM_PROMPT) + "\n\n" + prompt_text
     argv += ["--", full]
     env.pop("OPENAI_API_KEY", None)
     return argv, None, env
 
 
+def describe_sim(d):
+    """One log line for a simulation tool call recorded by the MCP server."""
+    t, a, r, e = d.get("tool"), d.get("args") or {}, d.get("result") or {}, d.get("error")
+    if e:
+        return f"[{t}] error: {e}"
+    if t == "get_model":
+        return f"[get_model] {len(r.get('bodies') or [])} body(ies), {len(r.get('faces') or [])} faces listed"
+    if t == "set_material":
+        return f"[material] {r.get('material')} -> bodies {r.get('bodies')}"
+    if t == "add_condition":
+        sel = r.get("faces")
+        what = {k: a[k] for k in ("vector", "value", "components") if k in a}
+        return f"[condition] {r.get('id')} {a.get('type')} {what or ''} on " + (f"{len(sel)} face(s) {[f['id'] for f in sel]}" if sel else "bodies/global")
+    if t == "remove_condition":
+        return f"[condition] removed {r.get('removed')}"
+    if t == "set_analysis":
+        return f"[analysis] {r.get('analysis')} {r.get('settings') or ''}"
+    if t == "set_mesh":
+        return f"[mesh] {r.get('mesh')}"
+    if t == "solve":
+        keys = ("max_deformation_mm", "max_von_mises_mpa", "min_safety_factor", "frequencies_hz", "load_factors", "temperature_range")
+        return "[solve] " + ", ".join(f"{k}={r[k]}" for k in keys if k in r) + (f" (mesh {r['mesh']['nodes']} nodes)" if r.get("mesh") else "")
+    return f"[{t}]"
+
+
 class _Watcher(threading.Thread):
     """Polls the run directory for build_NNNN.json written by the MCP server."""
 
-    def __init__(self, run_dir, on_build, log):
+    def __init__(self, run_dir, on_build, log, on_sim=None):
         super().__init__(daemon=True)
-        self.run_dir, self.on_build, self.log = run_dir, on_build, log
+        self.run_dir, self.on_build, self.log, self.on_sim = run_dir, on_build, log, on_sim
         self.seen = set()
         self.stop = threading.Event()
         self.n = 0
 
+    def poll_sim(self):
+        for p in sorted(glob.glob(os.path.join(self.run_dir, "sim_*.json"))):
+            if p in self.seen:
+                continue
+            try:
+                with open(p, encoding="utf-8") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                continue
+            self.seen.add(p)
+            self.log("AI: " + describe_sim(d))
+            if self.on_sim:
+                self.on_sim(d)
+
     def poll(self):
+        self.poll_sim()
         for p in sorted(glob.glob(os.path.join(self.run_dir, "build_*.json"))):
             if p in self.seen:
                 continue
@@ -305,7 +365,7 @@ def _parse_claude(e, log, texts, usage):
             if c.get("type") == "text" and c.get("text", "").strip():
                 texts.append(c["text"])
                 log("AI: " + c["text"].strip())
-            elif c.get("type") == "tool_use" and not str(c.get("name", "")).endswith("build_cad"):
+            elif c.get("type") == "tool_use" and str(c.get("name", "")).split("__")[-1] in ("cad_guide", "current_model"):
                 log(f"AI: (reading {str(c.get('name')).split('__')[-1]})")
     elif t == "result":
         u = e.get("usage") or {}
@@ -346,8 +406,11 @@ def _parse_codex(e, log, texts, usage):
 
 
 def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", model=None, effort=None,
-            visual=True, log=None, on_build=None, should_stop=None, timeout=1800, run_dir=None):
-    """Generate a part through a signed-in CLI. Same result dict as `gfem.cad.ai.run_agent`."""
+            visual=True, log=None, on_build=None, should_stop=None, timeout=1800, run_dir=None,
+            project=None, on_sim=None):
+    """Generate a part through a signed-in CLI. Same result dict as `gfem.cad.ai.run_agent`.
+    project: a gfem project dict -> simulation mode (the model may also set up and solve the
+    analysis); the final project is returned in result['project']."""
     log = log or (lambda s: None)
     st = status(provider)
     if not st["installed"]:
@@ -368,15 +431,28 @@ def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", mo
         text = "\n\n".join(extra) + "\n\n" + text
     if provider == "codex-cli" and any(a["kind"] == "pdf" for a in atts):
         log("AI: note: Codex CLI cannot read PDF attachments; convert the drawing to PNG")
+    proj_path = None
+    if project is not None:
+        from .. import project as P
+        proj_path = os.path.join(run_dir, "project.gfem.json")
+        P.save(project, proj_path)
+        base_file = None                                 # the project carries the current geometry
+        text = text.replace("Units: ", "Simulation request. Units: ", 1) if not base_features else text
     argv, stdin, env = build_command(provider, text, run_dir, units, base_file, model, effort, visual,
-                                     [a for a in atts if a["kind"] in ("image", "pdf")])
+                                     [a for a in atts if a["kind"] in ("image", "pdf")], project=proj_path)
     builds = []
 
     def ob(rep):
         builds.append(rep)
         if on_build:
             on_build(rep)
-    w = _Watcher(run_dir, ob, log)
+    sims = []
+
+    def osim(d):
+        sims.append(d)
+        if on_sim:
+            on_sim(d)
+    w = _Watcher(run_dir, ob, log, osim)
     w.start()
     texts, usage = [], dict(input=0, output=0, cache_read=0)
     t0 = time.time()
@@ -429,7 +505,20 @@ def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", mo
                    units=(best or {}).get("units", units), summary=(texts[-1].strip() if texts else ""),
                    report=best, png=(best or {}).get("png"), builds=len(builds), usage=usage,
                    seconds=round(time.time() - t0, 2), run_dir=run_dir)
-    if best is None:
+    if proj_path:
+        from .. import project as P
+        try:
+            res["project"] = P.load(proj_path)
+        except (OSError, ValueError):
+            res["project"] = None
+        res["sim"] = [dict(tool=d.get("tool"), error=d.get("error")) for d in sims]
+        solved = [d for d in sims if d.get("tool") == "solve" and not d.get("error")]
+        res["solve_summary"] = solved[-1]["result"] if solved else None
+        if res["project"] and res["project"]["geometry"]["features"]:
+            res["ok"] = True
+            res["features"] = res["project"]["geometry"]["features"]
+            res.pop("error", None)
+    if not res["ok"]:
         res["error"] = error or "the model did not produce a valid geometry"
     elif error:
         log("AI: " + error)

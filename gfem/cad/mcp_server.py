@@ -27,7 +27,10 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 
 class Server:
-    def __init__(self, run_dir=None, units="mm", base=None, visual=True, out=None):
+    def __init__(self, run_dir=None, units="mm", base=None, visual=True, out=None, project=None):
+        self.project = project
+        self._sim = None
+        self.nsim = 0
         self.run_dir = run_dir
         self.units = units
         self.base = base or []
@@ -50,12 +53,48 @@ class Server:
                  inputSchema={"type": "object", "properties": {}}),
             dict(name="current_model", description="Returns the feature tree of the model the user wants to modify "
                  "(empty if a new part is requested).", inputSchema={"type": "object", "properties": {}}),
-        ], "# Conventions" + guide
+        ] + (self._sim_tools() if self.project else []), "# Conventions" + guide
+
+    def _sim_tools(self):
+        from .ai_sim import SIM_TOOLS
+        return SIM_TOOLS
+
+    @property
+    def sim(self):
+        if self._sim is None:
+            from .ai_sim import SimTools
+            self._sim = SimTools(self.project, workdir=os.path.join(self.run_dir or os.path.dirname(self.project), "sim_work"))
+        return self._sim
+
+    def _log_sim(self, name, args, result, err):
+        if not self.run_dir:
+            return
+        self.nsim += 1
+        tmp = os.path.join(self.run_dir, f"sim_{self.nsim:04d}.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(tool=name, args=args, result=result, error=err, time=time.time()), f, default=float)
+        os.replace(tmp, tmp[:-4])
 
     def call(self, name, args):
         from .ai import TOOL_NAME, evaluate, report_text
+        from .ai_sim import SIM_TOOLS
+        if self.project and name in {t["name"] for t in SIM_TOOLS}:
+            try:
+                res = self.sim.call(name, args)
+                err = None
+            except Exception as e:  # noqa: BLE001
+                res, err = None, f"{type(e).__name__}: {e}"
+            self._log_sim(name, args, res, err)
+            if err:
+                return [dict(type="text", text="ERROR: " + err)], True
+            return [dict(type="text", text=json.dumps(res, default=float))], False
         if name == "cad_guide":
-            return [dict(type="text", text=self.tools()[1] + ("\n\n# Current model\n" + json.dumps(self.base) if self.base else ""))], False
+            extra = ""
+            if self.project:
+                from .ai_sim import SIM_GUIDE
+                from .. import project as P
+                extra = "\n\n" + SIM_GUIDE.format(library=", ".join(m["name"] for m in P.LIBRARY))
+            return [dict(type="text", text=self.tools()[1] + extra + ("\n\n# Current model\n" + json.dumps(self.base) if self.base else ""))], False
         if name == "current_model":
             return [dict(type="text", text=json.dumps(dict(units=self.units, features=self.base)))], False
         if name != TOOL_NAME:
@@ -74,6 +113,13 @@ class Server:
             k = self.n
         if self.run_dir:
             self._write(k, rep)
+        if self.project and rep["ok"]:
+            try:
+                stale = self.sim.set_geometry(rep["features"], units=units, name=args.get("name"))
+                rep["warnings"] = list(rep["warnings"]) + ["project geometry updated; call get_model for face ids before adding conditions"] + (
+                    [f"conditions {stale} no longer match any face: remove and re-add them"] if stale else [])
+            except Exception as e:  # noqa: BLE001
+                rep["warnings"] = list(rep["warnings"]) + [f"project update failed: {e}"]
         content = [dict(type="text", text=report_text(rep))]
         if rep.get("png"):
             content.append(dict(type="image", data=base64.b64encode(rep["png"]).decode(), mimeType="image/png"))
@@ -166,6 +212,7 @@ def main(argv=None):
     p.add_argument("--units", default="mm")
     p.add_argument("--base", help="JSON file with the feature tree being modified")
     p.add_argument("--no-visual", action="store_true")
+    p.add_argument("--project", help="gfem project (.gfem.json): enables the simulation tools")
     a = p.parse_args(argv)
     base = []
     if a.base:
@@ -174,7 +221,7 @@ def main(argv=None):
     # stdout is the protocol channel: anything else printed by libraries must go to stderr
     out = sys.stdout
     sys.stdout = sys.stderr
-    Server(a.run_dir, a.units, base, not a.no_visual, out=out).serve()
+    Server(a.run_dir, a.units, base, not a.no_visual, out=out, project=a.project).serve()
 
 
 if __name__ == "__main__":

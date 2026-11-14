@@ -232,6 +232,7 @@ export class AIDialog {
     const body = {
       prompt, mode, attachments: this.atts.map(a => a.path),
       base_features: mode === "modify" ? this.app.project.geometry.features : null,
+      project: mode === "simulate" ? this.app.project : null,
       provider: prov, model: $("#ai-model").value.trim() || null, effort: $("#ai-effort").value,
       base_url: $("#ai-base").value.trim() || null, max_turns: +$("#ai-turns").value || null, visual: $("#ai-visual").checked,
     };
@@ -299,24 +300,38 @@ export class AIDialog {
   }
 
   async apply(e) {
-    const app = this.app, g = app.project.geometry;
-    this.history.push({ features: JSON.parse(JSON.stringify(g.features)), name: app.project.name, units: app.project.units });
+    const app = this.app;
+    const sim = !!e.project;
+    this.history.push(sim ? { project: JSON.parse(JSON.stringify(app.project)) }
+      : { features: JSON.parse(JSON.stringify(app.project.geometry.features)), name: app.project.name });
     $("#ai-undo").disabled = false;
-    g.features = e.features;
-    if (this.mode() === "new" && e.name) {
-      app.project.name = e.name; $("#proj-name").value = e.name;
+    if (sim) {
+      app.project = e.project; $("#proj-name").value = e.project.name || "";
+      app.renderRibbon(app.tab || "home");
+    } else {
+      app.project.geometry.features = e.features;
+      if (this.mode() === "new" && e.name) { app.project.name = e.name; $("#proj-name").value = e.name; }
     }
     const ok = await app.regenerate();
-    this.line(ok ? `✔ applied to the model (${e.features.length} features)` : "✖ the result could not be regenerated in the GUI", ok ? "b" : "e");
-    app.log(`AI CAD: ${e.features.length} features generated` + (e.name ? ` – ${e.name}` : ""));
-    if (ok) { document.querySelector('input[name="ai-mode"][value="modify"]').disabled = false; this.setMode("modify"); $("#ai-prompt").value = ""; $("#ai-prompt").placeholder = "Describe a change (e.g. 'make the bolt holes M12 and add a 2 mm chamfer on the outer edge'), or switch to New part."; }
+    this.line(ok ? `✔ applied to the model (${e.features.length} features` + (sim ? `, ${app.project.conditions.length} conditions, ${app.project.analysis.type})` : ")")
+      : "✖ the result could not be regenerated in the GUI", ok ? "b" : "e");
+    app.log(`AI ${sim ? "simulation" : "CAD"}: ${e.features.length} features` + (e.name ? ` – ${e.name}` : ""));
+    if (!ok) return;
+    const modR = document.querySelector('input[name="ai-mode"][value="modify"]'); modR.disabled = false;
+    if (sim) {
+      if (e.solve_summary) { this.line("solving in the GUI to show the results…", "s"); app.solve(); }
+      $("#ai-prompt").value = ""; $("#ai-prompt").placeholder = "Ask for a change (e.g. 'the safety factor must be at least 4 – thicken the bar') or a new analysis.";
+    } else {
+      this.setMode("modify"); $("#ai-prompt").value = "";
+      $("#ai-prompt").placeholder = "Describe a change (e.g. 'make the bolt holes M12 and add a 2 mm chamfer on the outer edge'), or switch to New part.";
+    }
   }
 
   async undo() {
     const h = this.history.pop();
     if (!h) return;
-    this.app.project.geometry.features = h.features;
-    this.app.project.name = h.name; $("#proj-name").value = h.name;
+    if (h.project) { this.app.project = h.project; $("#proj-name").value = h.project.name || ""; }
+    else { this.app.project.geometry.features = h.features; this.app.project.name = h.name; $("#proj-name").value = h.name; }
     await this.app.regenerate();
     this.line("↶ restored the previous geometry", "s");
     $("#ai-undo").disabled = !this.history.length;

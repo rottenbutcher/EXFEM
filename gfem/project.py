@@ -564,12 +564,31 @@ def result_field(frame, rtype, project=None):
     if rtype == "safety_factor" and "MISES" in frame:
         sy = None
         if project:
-            ys = [m.get("yield", 0) for m in project.get("materials", []) if m.get("yield")]
+            ys = [m.get("yield", 0) for m in materials_in_use(project) if m.get("yield")]
             sy = min(ys) if ys else None
         if not sy:
             return None
         return np.minimum(sy / np.maximum(frame["MISES"], 1e-300), 15.0)
     return None
+
+
+def materials_in_use(project, info=None):
+    """Materials assigned to (unsuppressed) bodies; bodies without an assignment use the first
+    material. Falls back to all materials when nothing can be decided."""
+    mats = project.get("materials", [])
+    if not mats:
+        return []
+    by_id = {m["id"]: m for m in mats}
+    bodies = project.get("bodies") or {}
+    if info and info.get("bodies"):
+        ids = [str(b["id"]) for b in info["bodies"] if not (bodies.get(str(b["id"])) or {}).get("suppressed")]
+    else:
+        ids = list(bodies)
+    used = {(bodies.get(i) or {}).get("material") or mats[0]["id"] for i in ids}
+    if not ids:
+        used = {mats[0]["id"]} if not bodies else {b.get("material") or mats[0]["id"] for b in bodies.values()}
+    out = [by_id[u] for u in used if u in by_id]
+    return out or mats
 
 
 def save(project, path):

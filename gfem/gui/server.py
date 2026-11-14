@@ -133,18 +133,27 @@ class Session:
         from ..cad.geometry import match
         old = self.project.get("bodies", {})
         new = {}
-        refs = [(k, v) for k, v in old.items() if v.get("sig") and k.isdigit()]
-        cand_ids = [b["id"] for b in self.info["bodies"]]
-        for k, v in refs:
-            ids, _ = match(self.info, 3, [dict(id=int(k), sig=v["sig"])])
+        refs = [(k, v) for k, v in old.items() if k.isdigit()]
+        cur = {b["id"]: b for b in self.info["bodies"]}
+        unmatched = []
+        for k, v in refs:                                  # 1) geometric signature
+            ids = match(self.info, 3, [dict(id=int(k), sig=v["sig"])])[0] if v.get("sig") else []
             if ids and str(ids[0]) not in new:
-                nv = dict(v)
-                nv["sig"] = next(b["sig"] for b in self.info["bodies"] if b["id"] == ids[0])
-                new[str(ids[0])] = nv
+                new[str(ids[0])] = dict(v, sig=cur[ids[0]]["sig"], feature=cur[ids[0]].get("feature"))
+            else:
+                unmatched.append((k, v))
+        free = [b for b in self.info["bodies"] if str(b["id"]) not in new]
+        for k, v in unmatched:                             # 2) same creating feature (dimension edits)
+            hit = next((b for b in free if v.get("feature") and b.get("feature") == v["feature"]), None)
+            if hit is None and int(k) in cur and cur[int(k)] in free:   # 3) same body id
+                hit = cur[int(k)]
+            if hit is not None:
+                free.remove(hit)
+                new[str(hit["id"])] = dict(v, sig=hit["sig"], feature=hit.get("feature"))
         mat0 = self.project["materials"][0]["id"] if self.project["materials"] else None
         for i, b in enumerate(self.info["bodies"]):
             if str(b["id"]) not in new:
-                new[str(b["id"])] = dict(name=f"Body {b['id']}", material=mat0, sig=b["sig"])
+                new[str(b["id"])] = dict(name=f"Body {b['id']}", material=mat0, sig=b["sig"], feature=b.get("feature"))
         # sheet (shell) and line (beam) bodies keep their section data by signature
         diag = self.info.get("diag", 1.0)
         for pre, key, dim, defaults in (("S", "sheets", 2, dict(thickness=max(diag / 100, 1e-3))),
@@ -405,7 +414,11 @@ class Session:
             if not path.startswith(os.path.join(self.workdir, "uploads")):
                 raise P.ProjectError("attachments must be uploaded through the GUI")
             atts.append(AI.load_attachment(path))
-        base = body.get("base_features") if body.get("mode") == "modify" else None
+        mode = body.get("mode")
+        base = body.get("base_features") if mode == "modify" else None
+        sim_project = None
+        if mode == "simulate":
+            sim_project = copy.deepcopy(body.get("project") or self.project)
         units = self.project.get("units", "mm")
         self.ai_stop.clear()
         rid = int(time.time() * 1000)
@@ -428,10 +441,11 @@ class Session:
                                   attachments=atts, base_features=base, units=units,
                                   max_turns=body.get("max_turns") or None, visual=body.get("visual"),
                                   log=lambda m: ev("log", msg=m), on_build=on_build,
-                                  should_stop=self.ai_stop.is_set)
+                                  should_stop=self.ai_stop.is_set, project=sim_project)
                 ev("done", ok=res["ok"], error=res.get("error"), features=res["features"], name=res.get("name"),
                    units=res.get("units"), summary=res.get("summary"), usage=res.get("usage"),
-                   seconds=res.get("seconds"), builds=res.get("builds"),
+                   seconds=res.get("seconds"), builds=res.get("builds"), project=res.get("project"),
+                   solve_summary=res.get("solve_summary"),
                    png=base64.b64encode(res["png"]).decode() if res.get("png") else None)
             except Exception as e:  # noqa: BLE001
                 ev("done", ok=False, error=str(e))
