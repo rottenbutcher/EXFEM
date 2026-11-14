@@ -101,3 +101,19 @@ def test_mcp_project_mode(tmp_path):
     assert out[4]["result"]["isError"]
     assert P.load(str(pj))["conditions"][0]["type"] == "fixed"
     assert len(list((tmp_path / "run").glob("sim_*.json"))) == 2
+
+
+def test_setup_warnings_and_sim_refuses_unsupported(tmp_path):
+    from gfem.gui.server import setup_warnings
+    p = P.new_project("mm")
+    p["geometry"]["features"] = BAR
+    w = setup_warnings(p)
+    assert any(x.startswith("no supports") for x in w) and any(x.startswith("no loads") for x in w)
+    p["conditions"] = [dict(id="B1", type="fixed", scope=dict(dim=2, ids=[1])), dict(id="L1", type="force", vector=[0, 0, -1], scope=dict(dim=2, ids=[]))]
+    w = setup_warnings(p)
+    assert not any(x.startswith("no supports") for x in w) and any("empty scope" in x for x in w)
+    st = SimTools(str(tmp_path / "p.gfem.json"), workdir=str(tmp_path / "w"))
+    st.set_geometry(BAR)
+    st.add_condition("force", faces=[2], vector=[0, 0, -1])
+    with pytest.raises(P.ProjectError, match="no supports"):
+        st.solve()

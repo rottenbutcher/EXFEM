@@ -349,6 +349,10 @@ class SimTools:
         if stale:
             raise P.ProjectError(f"conditions {stale} no longer select any face of the current geometry; "
                                  "remove_condition them and add them again (get_model lists the faces)")
+        from ..gui.server import setup_warnings
+        problems = [w for w in setup_warnings(self.p) if w.startswith(("no supports", "no temperature"))]
+        if problems:
+            raise P.ProjectError(" ".join(problems))
         self._ev0 = len(self.s.events)
         self.s.solve()
         self.solved = True

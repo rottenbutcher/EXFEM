@@ -78,6 +78,11 @@ class App {
       $("#st-job").textContent = e.status === "running" ? "Solving…" : `Job ${e.status}`;
       $("#st-job").className = e.status;
       if (e.status !== "running") { this.status.solve = e.status === "done" ? "ok" : "failed"; this.loadResults(); }
+      if (e.status === "failed") {
+        const errs = [...document.querySelectorAll("#log .logline.err, #log .logline.warn")].slice(-5).map(d => d.textContent).join("\n");
+        this.ai.prefillFix(errs);
+        this.log("Solve failed. AI CAD > Simulate can diagnose and fix the setup (the error is pre-filled).", "warn");
+      }
       this.renderTree();
     } else if (e.type === "mesh") { this.loadMesh(false); }
     else if (e.type === "ai") this.ai.onEvent(e);

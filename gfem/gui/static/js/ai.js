@@ -65,8 +65,18 @@ export class AIDialog {
     });
   }
 
+  prefillFix(errorText) {
+    this._fix = "The last solve of this project failed with:\n" + (errorText || "(no message)") +
+      "\nFind the cause (geometry, supports, loads, materials, mesh), fix the setup and solve again.";
+  }
+
   async open() {
     this.dlg.classList.add("open");
+    if (this._fix && !this.busy && !$("#ai-prompt").value.trim()) {
+      $("#ai-prompt").value = this._fix; this._fix = null;
+      setTimeout(() => this.setMode("simulate"), 0);
+      setTimeout(() => this.renderChips(), 0);
+    }
     const hasGeom = (this.app.project?.geometry.features || []).length > 0;
     if (!this.busy) this.setMode(hasGeom && this.history.length ? "modify" : "new");
     document.querySelector('input[name="ai-mode"][value="modify"]').disabled = !hasGeom;

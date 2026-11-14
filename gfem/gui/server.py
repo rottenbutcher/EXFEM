@@ -512,6 +512,8 @@ class Session:
         sp = P.build_spec(p, self.mesh_spec, self.info, log=self.log)
         for w in sp.warnings:
             self.log(f"warning: {w}")
+        for w in setup_warnings(p):
+            self.log(f"warning: {w}")
         mon = GuiMonitor(self)
         out = os.path.join(self.workdir, "results")
         opts = dict(linear_solver=p["analysis"].get("linear_solver", "auto"),
@@ -577,6 +579,28 @@ class Session:
         if rtype == "density" and "density" in fr:
             res["density_elem_min"] = float(np.min(fr["density"]))
         return res
+
+
+def setup_warnings(p):
+    """Plain-language checks of an analysis setup before solving."""
+    out = []
+    kind = p["analysis"]["type"]
+    active = [c for c in p.get("conditions", []) if not c.get("suppressed")]
+    supports = [c for c in active if P.CONDITIONS.get(c["type"], {}).get("group") == "support"]
+    loads = [c for c in active if P.CONDITIONS.get(c["type"], {}).get("group") == "load"]
+    if kind in ("static", "buckling", "nonlinear_buckling", "transient", "thermal_stress", "topopt", "harmonic") \
+            and not supports and not p.get("connections") and kind != "deck":
+        out.append("no supports: the model can move freely as a rigid body, so a static solve cannot converge. "
+                   "Add a Fixed Support (or displacement / frictionless supports) on at least one face.")
+    if kind in ("static", "buckling", "nonlinear_buckling", "topopt") and not loads and kind != "deck":
+        out.append("no loads: the result will be zero. Add a force, pressure, gravity or other load.")
+    if kind in ("thermal", "thermal_transient") and not any(c["type"] in ("temperature", "convection", "radiation") for c in active):
+        out.append("no temperature, convection or radiation boundary: the steady temperature is not defined.")
+    for c in active:
+        sc = c.get("scope")
+        if sc is not None and not sc.get("ids") and not sc.get("named") and not sc.get("set"):
+            out.append(f"{c.get('name', c['id'])} has no faces/bodies selected (empty scope).")
+    return out
 
 
 def _jsonable(x):
