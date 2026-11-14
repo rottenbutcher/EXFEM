@@ -1157,7 +1157,7 @@ def generate(prompt, provider=None, model=None, api_key=None, base_url=None, eff
     'compatible' (API key or local server)."""
     s = load_settings()
     provider = provider or s["provider"]
-    if provider in ("claude-cli", "codex-cli"):          # signed-in CLI, no API key
+    if provider in ("claude-cli", "codex-cli") and backend is None and client is None:   # signed-in CLI
         from .ai_cli import run_cli
         if model is None and provider == s.get("provider"):
             model = s.get("model") or None
@@ -1175,6 +1175,8 @@ def generate(prompt, provider=None, model=None, api_key=None, base_url=None, eff
     atts = [a if isinstance(a, dict) else load_attachment(a) for a in attachments]
     text = build_request(prompt, base_features, units)
     if backend is None:
+        if provider in ("claude-cli", "codex-cli"):        # a client object was given: use the API path
+            provider = "anthropic" if provider == "claude-cli" else "openai"
         backend = make_backend(provider, text, atts, model=model, api_key=api_key or api_key_for(provider, s),
                                effort=effort, base_url=base_url or None, client=client)
     return run_agent(backend, units=units, max_turns=max_turns, visual=visual, log=log, on_text=on_text,
