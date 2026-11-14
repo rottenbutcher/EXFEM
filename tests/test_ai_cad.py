@@ -339,3 +339,34 @@ def test_new_cad_features_exact_volumes():
     frustum = vol([dict(id="L", type="loft", ruled=True, sections=[dict(plane="XY", loop=dict(rect=[-20, -20, 20, 20])),
                                                                    dict(plane="XY", offset=30, loop=dict(rect=[-10, -10, 10, 10]))])])
     assert frustum == pytest.approx(30 / 3 * (1600 + 400 + np.sqrt(1600 * 400)), rel=1e-6)
+
+
+def test_shell_and_loft_robustness():
+    """Lofts are aligned (no twist, edge counts matched, outward orientation); shells are checked
+    against a thin-wall estimate, so an invalid OpenCASCADE result is never returned."""
+    from gfem.cad import CadModel
+    from gfem.cad.geometry import GeometryError
+
+    def bodies(f):
+        return [b["volume"] for b in CadModel(f).regenerate()["bodies"]]
+    duct = lambda l1: dict(id="L", type="loft", sections=[dict(plane="XY", loop=l1), dict(plane="XY", offset=80, loop=dict(circle=[0, 0, 15]))])
+    full = bodies([duct(dict(rect=[-30, -20, 30, 20]))])[0]
+    assert 100000 < full < 117600                      # smooth loft below the linear frustum, no twist collapse
+    assert bodies([dict(id="L", type="loft", sections=[dict(plane="XY", loop=dict(circle=[0, 0, 30])),
+                                                       dict(plane="XY", offset=80, loop=dict(circle=[0, 0, 15]))])])[0] == pytest.approx(80 / 3 * np.pi * (900 + 225 + 450), rel=1e-6)
+    vols = {}
+    for k, opens in (("both", [{"normal": [0, 0, -1]}, {"normal": [0, 0, 1]}]), ("one", [{"normal": [0, 0, 1]}]), ("closed", [])):
+        v = bodies([duct(dict(rect=[-30, -20, 30, 20])), dict(id="S", type="shell", target=["L"], thickness=2, open_faces=opens)])
+        assert len(v) == 1 and v[0] > 0
+        vols[k] = v[0]
+    assert vols["both"] < vols["one"] < vols["closed"] < 0.3 * full
+    assert bodies([dict(id="B", type="box", dx=100, dy=60, dz=40), dict(id="S", type="shell", target=["B"], thickness=2)]) == [pytest.approx(240000 - 96 * 56 * 36)]
+    assert bodies([dict(id="C", type="cylinder", r=30, dz=50),
+                   dict(id="S", type="shell", target=["C"], thickness=3, open_faces=[{"normal": [0, 0, 1]}])]) == [pytest.approx(np.pi * (900 * 50 - 27 ** 2 * 47))]
+    # a shape OpenCASCADE cannot offset fails cleanly instead of returning a wrong solid
+    for opens in ([{"normal": [0, 0, -1]}, {"normal": [0, 0, 1]}], []):
+        try:
+            v = bodies([duct(dict(slot=[-15, 0, 15, 0, 20])), dict(id="S", type="shell", target=["L"], thickness=2, open_faces=opens)])
+            assert len(v) == 1 and 0 < v[0] < 40000
+        except GeometryError:
+            pass
