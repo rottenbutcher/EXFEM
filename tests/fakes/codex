@@ -11,7 +11,9 @@ for i, x in enumerate(a):
         k, v = a[i + 1].split("=", 1)
         cfg[k] = tomllib.loads("v=" + v)["v"]
 imgs = [a[i + 1] for i, x in enumerate(a) if x == "-i"]
-prompt = a[a.index("--") + 1]
+prompt = sys.stdin.read() if a[-1] == "-" else a[a.index("--") + 1]
+if "resume" in a:
+    prompt = "RESUMED " + prompt
 env = dict(os.environ, **cfg["mcp_servers.gfem.env"])
 p = subprocess.Popen([cfg["mcp_servers.gfem.command"]] + cfg["mcp_servers.gfem.args"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
 def rpc(i, m, params=None):

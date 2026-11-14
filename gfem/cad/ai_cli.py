@@ -46,6 +46,27 @@ def exe(provider):
     return shutil.which(name) or (shutil.which(name + ".cmd") if os.name == "nt" else None)
 
 
+_ENTRY = {"claude-cli": ("@anthropic-ai", "claude-code", "cli.js"), "codex-cli": ("@openai", "codex", "bin/codex.js")}
+
+
+def cmd(provider):
+    """argv prefix that starts the CLI. On Windows npm installs `claude.cmd` / `codex.cmd`, which run
+    through cmd.exe and mangle arguments containing newlines, quotes, & or |; run the package's
+    JavaScript entry with node instead when it can be found."""
+    x = exe(provider)
+    if not x:
+        return None
+    if x.lower().endswith((".cmd", ".bat", ".ps1")):
+        scope, pkg, entry = _ENTRY[provider]
+        base = os.path.dirname(x)
+        for root in (os.path.join(base, "node_modules"), os.path.join(base, "..", "lib", "node_modules")):
+            script = os.path.join(root, scope, pkg, *entry.split("/"))
+            node = shutil.which("node") or os.path.join(base, "node.exe")
+            if os.path.exists(script) and node and os.path.exists(node):
+                return [node, script]
+    return [x]
+
+
 def _run(args, timeout=20, env=None, inp=None):
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env, input=inp,
@@ -64,10 +85,11 @@ def status(provider):
     if not x:
         out["detail"] = f"{d['exe']} is not installed"
         return out
-    rc, txt = _run([x, "--version"], timeout=20)
+    c = cmd(provider)
+    rc, txt = _run(c + ["--version"], timeout=20)
     out["version"] = txt.strip().splitlines()[0] if rc == 0 and txt.strip() else None
     if provider == "claude-cli":
-        rc, txt = _run([x, "auth", "status", "--json"], timeout=25)
+        rc, txt = _run(c + ["auth", "status", "--json"], timeout=25)
         try:
             j = json.loads(txt[txt.index("{"):txt.rindex("}") + 1])
             out["logged_in"] = bool(j.get("loggedIn"))
@@ -77,7 +99,7 @@ def status(provider):
         except ValueError:
             out["detail"] = txt.strip()[:200]
     else:
-        rc, txt = _run([x, "login", "status"], timeout=25)
+        rc, txt = _run(c + ["login", "status"], timeout=25)
         t = txt.strip()
         out["logged_in"] = rc == 0 and "not logged in" not in t.lower()
         out["detail"] = t.splitlines()[-1][:200] if t else ""
@@ -90,13 +112,13 @@ class Login:
     ``on_line``; ``send(code)`` answers 'paste code' prompts; ``on_exit(ok)`` fires when it ends."""
 
     def __init__(self, provider, on_line=None, on_exit=None, device=False, console=False):
-        x = exe(provider)
-        if not x:
+        c = cmd(provider)
+        if not c:
             raise AIError(f"{CLIS[provider]['exe']} is not installed: {status(provider)['install']}")
         if provider == "claude-cli":
-            args = [x, "auth", "login", "--console" if console else "--claudeai"]
+            args = c + ["auth", "login", "--console" if console else "--claudeai"]
         else:
-            args = [x, "login"] + (["--device-auth"] if device else [])
+            args = c + ["login"] + (["--device-auth"] if device else [])
         self.provider = provider
         self.urls = []
         self.lines = []
@@ -150,10 +172,10 @@ class Login:
 
 
 def logout(provider):
-    x = exe(provider)
-    if not x:
+    c = cmd(provider)
+    if not c:
         return False
-    rc, _ = _run([x, "auth", "logout"] if provider == "claude-cli" else [x, "logout"], timeout=30)
+    rc, _ = _run(c + (["auth", "logout"] if provider == "claude-cli" else ["logout"]), timeout=30)
     return rc == 0
 
 
@@ -202,8 +224,8 @@ def _toml_str(s):
 def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, model=None, effort=None,
                   visual=True, images=(), project=None, session=None):
     """-> (argv, stdin_text|None, env). With `project` the simulation tools are enabled."""
-    x = exe(provider)
-    if not x:
+    c = cmd(provider)
+    if not c:
         raise AIError(f"{CLIS[provider]['exe']} is not installed: {status(provider)['install']}")
     py, margs, menv = _mcp_cmd(run_dir, units, base_file, visual, project)
     template = CLI_SIM_PROMPT if project else CLI_PROMPT
@@ -213,8 +235,11 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
         cfg = os.path.join(run_dir, "mcp.json")
         with open(cfg, "w", encoding="utf-8") as f:
             json.dump({"mcpServers": {"gfem": {"type": "stdio", "command": py, "args": margs, "env": menv}}}, f)
-        argv = [x, "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
-                "--system-prompt", template.format(system=SYSTEM_PROMPT),
+        sysf = os.path.join(run_dir, "system_prompt.txt")     # a file: no long argument through cmd.exe
+        with open(sysf, "w", encoding="utf-8") as f:
+            f.write(template.format(system=SYSTEM_PROMPT))
+        argv = c + ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+                "--system-prompt-file", sysf,
                 "--tools", "", "--mcp-config", cfg, "--strict-mcp-config",
                 "--allowedTools", *[f"mcp__gfem__{t}" for t in tools],
                 "--setting-sources", ""]
@@ -236,6 +261,8 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
         content.append({"type": "text", "text": prompt_text})
         stdin = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
         env.pop("ANTHROPIC_API_KEY", None)            # use the signed-in account, not a stray key
+        env.setdefault("MCP_TIMEOUT", "120000")       # gfem tool server start-up (ms)
+        env.setdefault("MCP_TOOL_TIMEOUT", "3600000") # a large solve can take a while (ms)
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"):
             env.pop(k, None)                          # gfem started from inside a Claude Code session
         return argv, stdin, env
@@ -244,14 +271,14 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
           "mcp_servers.gfem.args=[" + ",".join(_toml_str(a) for a in margs) + "]",
           "mcp_servers.gfem.env={" + ",".join(f"{k}={_toml_str(v)}" for k, v in menv.items()) + "}",
           "mcp_servers.gfem.default_tools_approval_mode=\"approve\"",
-          "mcp_servers.gfem.startup_timeout_sec=60", "mcp_servers.gfem.tool_timeout_sec=600",
+          "mcp_servers.gfem.startup_timeout_sec=120", "mcp_servers.gfem.tool_timeout_sec=3600",
           "approval_policy=\"never\""]
     if effort:
         ov.append(f"model_reasoning_effort={_toml_str({'xhigh': 'high', 'max': 'high'}.get(effort, effort))}")
     if session:                                        # resume: no -s/-C on this subcommand
-        argv = [x, "exec", "resume", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="read-only"']
+        argv = c + ["exec", "resume", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="read-only"']
     else:
-        argv = [x, "exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-C", run_dir]
+        argv = c + ["exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-C", run_dir]
     for o in ov:
         argv += ["-c", o]
     if model:
@@ -267,9 +294,9 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
     for p in paths:
         argv += ["-i", p]
     full = prompt_text if session else template.format(system=SYSTEM_PROMPT) + "\n\n" + prompt_text
-    argv += ([session] if session else []) + ["--", full]
+    argv += ([session] if session else []) + ["-"]           # prompt on stdin: no quoting problems
     env.pop("OPENAI_API_KEY", None)
-    return argv, None, env
+    return argv, full, env
 
 
 def describe_sim(d):

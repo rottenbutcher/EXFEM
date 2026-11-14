@@ -13,6 +13,7 @@ if a[:2] == ["auth", "login"]:
     print("Login successful." if code == "good" else "Invalid code."); sys.exit(0 if code == "good" else 1)
 if a[:2] == ["auth", "logout"]: sys.exit(0)
 assert "-p" in a and "--tools" in a and a[a.index("--tools") + 1] == ""
+assert "build_cad" in open(a[a.index("--system-prompt-file") + 1], encoding="utf-8").read()
 cfg = json.load(open(a[a.index("--mcp-config") + 1]))["mcpServers"]["gfem"]
 msg = json.loads(sys.stdin.readline())["message"]["content"]
 text = [c for c in msg if c["type"] == "text"][-1]["text"]

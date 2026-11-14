@@ -92,6 +92,9 @@ def test_claude_cli_run_and_modify(fakes, tmp_path):
 def test_codex_cli_run(fakes, tmp_path):
     r = AI.generate("plate", provider="codex-cli", run_dir=str(tmp_path / "r"))
     assert r["ok"] and r["name"] == "Plate" and r["usage"] == dict(input=1000, output=300, cache_read=200)
+    assert r["session"] == "t1"
+    r2 = AI.generate("more", provider="codex-cli", base_features=r["features"], session="t1", run_dir=str(tmp_path / "r2"))
+    assert r2["ok"] and r2["session"] == "t1"
     assert r["report"]["volume"] == pytest.approx(100 * 60 * 10 - 3.141592653589793 * 25 * 10, rel=1e-6)
 
 
@@ -118,4 +121,19 @@ def test_codex_overrides_are_toml(fakes, tmp_path):
         k, v = o.split("=", 1)
         tomllib.loads("v=" + v)
     assert 'approval_policy="never"' in ov and 'model_reasoning_effort="high"' in ov
-    assert stdin is None and argv[argv.index("-s") + 1] == "read-only"
+    assert "build_cad" in stdin and argv[-1] == "-" and argv[argv.index("-s") + 1] == "read-only"
+    argv2, stdin2, _ = ai_cli.build_command("codex-cli", "more", str(tmp_path), session="abc")
+    assert argv2[1:3] == ["exec", "resume"] and argv2[-2:] == ["abc", "-"] and stdin2 == "more"
+
+
+def test_windows_cmd_shim_runs_node_entry(tmp_path, monkeypatch):
+    """npm's claude.cmd must not be run through cmd.exe: gfem starts node + the package entry."""
+    bin_ = tmp_path / "npm"
+    (bin_ / "node_modules" / "@anthropic-ai" / "claude-code").mkdir(parents=True)
+    (bin_ / "node_modules" / "@anthropic-ai" / "claude-code" / "cli.js").write_text("")
+    (bin_ / "claude.cmd").write_text("@echo off")
+    monkeypatch.setenv("GFEM_CLAUDE_PATH", str(bin_ / "claude.cmd"))
+    c = ai_cli.cmd("claude-cli")
+    if c[0].endswith("claude.cmd"):
+        pytest.skip("node not found")
+    assert c[1].endswith("cli.js") and "node" in os.path.basename(c[0])
