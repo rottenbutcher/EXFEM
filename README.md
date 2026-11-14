@@ -226,76 +226,87 @@ Every CAD body, face, edge and vertex keeps its identity as a node/element set a
   Banded or smooth contours with an ANSYS-style legend, Max/Min markers, a deformation scale
   (auto/true/×N), animation of load history and mode shapes, probes, and tabular and graph views.
 - **Export**: Abaqus `.inp`, Nastran `.bdf`, STEP, STL, ParaView `.vtu`, CSV, PNG.
-- **AI CAD**: describe a part or attach a drawing; Claude / GPT builds it as a feature tree,
-  checks it against rendered views and measurements, and refines it on request.
+- **AI CAD / AI simulation**: sign in with a Claude or ChatGPT account (or use an API key);
+  describe a part or attach a drawing, and the model builds it, checks it against measurements
+  and rendered views, and in Simulate mode sets up, solves and checks the analysis.
 - **Examples**: L-bracket, plate with hole (Kt), cantilever modal, column buckling, heat-sink
   thermal-stress, topology optimisation, punch contact, rubber pad (hyperelastic NLGEOM).
 
-## AI CAD (text-to-CAD with Claude or GPT)
+## AI CAD and AI simulation (Claude or ChatGPT)
 
-Describe a part in plain language (any language), or attach a drawing (photo, screenshot, PDF, DXF),
-and an LLM builds it as a normal, editable gfem feature tree. Open it from **Home > AI CAD** or
-**Geometry > AI CAD**, or use the command line.
+Describe a part in plain language (any language) or attach a drawing (photo, screenshot, PDF, DXF).
+The model builds the part as a normal, editable gfem feature tree. In **Simulate** mode it also
+assigns materials, places supports and loads on the right faces, meshes, solves, reads the results
+and iterates until your requirement is met ("safety factor at least 2: make it thicker if not").
+Open it from **Home > AI CAD** or **Geometry > AI CAD**, or use `gfem ai` on the command line.
 
 ![AI CAD](docs/img/ai_cad.png)
 
-How it works: the model never writes free-form code. It calls a single tool, `build_cad`, with a
-JSON feature list (box, cylinder, sketch extrude/revolve, boolean, fillet, chamfer, pattern ...).
-gfem checks every call in three stages and returns the result to the model:
-
-1. **Static validation**: types, numbers, self-intersecting sketches, profiles that cross the
-   revolve axis, and references to unknown or already-consumed bodies, each with a precise message.
-2. **OpenCASCADE regeneration**: kernel errors such as a fillet that is too large.
-3. **Measurement and preview**: bodies, volumes, bounding box, faces, and a rendered 4-view image
-   (iso, front, top, right).
-
-The model compares this with the request and corrects itself, usually in one or two extra builds.
-The result is applied to the project (**Undo AI change** restores the previous geometry). The
-dialog then switches to **Modify current geometry**, so you can keep refining in follow-up
-requests ("make the bolt holes M12", "add 2 mm chamfers on the outer edge").
-
-| Provider | Setting | Default model |
-|---|---|---|
-| Anthropic Claude | `ANTHROPIC_API_KEY` or key saved in the dialog | `claude-opus-5-5` (adaptive thinking, streaming) |
-| OpenAI GPT | `OPENAI_API_KEY` or key saved in the dialog | `gpt-5` (Chat Completions, function calling) |
-| OpenAI-compatible (Ollama, vLLM, LM Studio) | base URL, e.g. `http://localhost:11434/v1` | any local model |
-
-Keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
-never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
-spend your credits.
-
-Install the SDKs:
+**Sign in instead of an API key.** Pick **Claude account** or **ChatGPT account** and press
+**Sign in**. The official sign-in page of Claude Code or OpenAI Codex opens in your browser; after you
+sign in (paste the code if the page shows one), requests use your Claude Pro / Max / Team or ChatGPT
+Plus / Pro / Team plan. gfem runs the official CLI with gfem's CAD and simulation tools attached
+over MCP, with the CLI's own shell and file tools switched off, so the model can only work on your gfem
+model. You need the CLI once:
 
 ```bash
-pip install -e ".[ai]"
+npm install -g @anthropic-ai/claude-code
 ```
 
-Generate a part from the command line:
+```bash
+npm install -g @openai/codex
+```
+
+API keys (Anthropic, OpenAI) and local OpenAI-compatible servers (Ollama, vLLM, LM Studio) work as
+well: choose **API key**.
+
+How it works. The model never writes free-form code; it calls gfem tools:
+
+| Tool | What gfem does |
+|---|---|
+| `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image |
+| `get_model` | bodies and faces (id, type, centre, outward normal, area) for picking faces |
+| `set_material`, `add_condition` | library or custom material; supports and loads on faces chosen by id or by filters (normal, box, type, area, nearest) |
+| `set_analysis`, `set_mesh`, `solve` | any gfem analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
+
+Every result goes back to the model, which checks it against your request and corrects itself.
+Conditions created with a face filter are re-applied after a geometry change; a condition that no
+longer selects anything blocks the solve. The result is applied to your project (**Undo AI change**
+restores the previous state), and follow-up requests continue the same conversation.
+
+![AI simulation](docs/img/ai_simulate.png)
+
+Command line:
+
+```bash
+gfem ai --login claude-cli
+```
 
 ```bash
 gfem ai "flange d120 x 15 mm, hub d60 x 40 with d30 bore, 6 bolt holes d11 on a d95 circle" -o flange.step
 ```
 
-From a drawing, writing a GUI project and a preview image:
-
 ```bash
 gfem ai "model the part in this drawing, plate thickness 8 mm" --attach drawing.png -o part.gfem.json --preview part.png
 ```
 
-Modify an existing project:
-
 ```bash
-gfem ai "make all holes 2 mm larger" --modify part.gfem.json -o part_v2.gfem.json
+gfem ai "aluminium cantilever 200 x 20 x 10, fixed at x=0, 100 N down at the tip; safety factor >= 3" --simulate -o study.gfem.json
 ```
 
-Store a key once (it is read from the prompt or stdin):
-
 ```bash
-gfem ai --set-key anthropic
+gfem ai --status
 ```
 
-Python API: `gfem.cad.ai.generate(prompt, provider="anthropic", attachments=[...])` returns the
-feature list, a summary, the measurement report and the preview PNG.
+The gfem tools can also be added to your own Claude Code or Codex sessions:
+
+```bash
+claude mcp add gfem -- python -m gfem.cad.mcp_server
+```
+
+API keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
+never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
+use your account or credits.
 
 ## Python API
 

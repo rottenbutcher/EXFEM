@@ -1,5 +1,7 @@
 # Examples
 
+AI CAD / AI simulation (Claude or ChatGPT sign-in): see [ai/README.md](ai/README.md).
+
 ## 1. GUI projects (`projects/`)
 Start the GUI (`gfem gui`), then **Open** a project file, or pick the same model from the
 **Examples** menu, and press **Solve (F5)**.
