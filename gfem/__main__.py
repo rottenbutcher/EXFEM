@@ -11,6 +11,7 @@
   gfem ai "..." --simulate -o study.gfem.json   geometry + materials + loads + solve + check
   gfem ai --login claude-cli|codex-cli  sign in with your Claude / ChatGPT account
   gfem ai --status                     sign-in / API key status
+  gfem mcp [--project p.gfem.json]     gfem tools as an MCP server; --register claude|codex adds them
   gfem ai --set-key anthropic|openai    store an API key in ~/.gfem/ai.json (0600)
 """
 import argparse
@@ -47,6 +48,10 @@ def main(argv=None):
     b = sub.add_parser("bench", help="kernel throughput benchmark")
     b.add_argument("n", nargs="*", type=int)
     sub.add_parser("info", help="show devices and versions")
+    mc = sub.add_parser("mcp", help="gfem CAD/simulation tools as an MCP server (for Claude Code, Codex, ...)")
+    mc.add_argument("--project", help="enable the simulation tools on this .gfem.json project")
+    mc.add_argument("--run-dir", help="also write every build/result to this directory")
+    mc.add_argument("--register", choices=["claude", "codex"], help="register gfem permanently in Claude Code / Codex and exit")
     ai = sub.add_parser("ai", help="text-to-CAD: an LLM (Claude / GPT) builds the part you describe")
     ai.add_argument("prompt", nargs="*", help="description of the part (or of the change with --modify)")
     ai.add_argument("-o", "--out", help="output: .step/.stp/.iges/.brep/.stl (CAD), .gfem.json (project), .json (features)")
@@ -108,8 +113,30 @@ def main(argv=None):
             print("CAD kernel: gmsh not installed (pip install gmsh)")
     elif a.cmd == "ai":
         return _ai(a)
+    elif a.cmd == "mcp":
+        return _mcp(a)
     else:
         p.print_help()
+
+
+def _mcp(a):
+    import os
+    import subprocess
+    if a.register:
+        from .cad import ai_cli
+        prov = "claude-cli" if a.register == "claude" else "codex-cli"
+        c = ai_cli.cmd(prov)
+        if not c:
+            print(f"not installed: {ai_cli.status(prov)['install']}")
+            return 1
+        server = [sys.executable, "-m", "gfem.cad.mcp_server"] + (["--project", os.path.abspath(a.project)] if a.project else [])
+        argv = c + (["mcp", "add", "--scope", "user", "gfem", "--"] if a.register == "claude" else ["mcp", "add", "gfem", "--"]) + server
+        rc = subprocess.call(argv)
+        print("registered: ask Claude/Codex to 'build a ... with the gfem tools'" if rc == 0 else "registration failed")
+        return rc
+    from .cad.mcp_server import main as mcp_main
+    args = (["--project", a.project] if a.project else []) + (["--run-dir", a.run_dir] if a.run_dir else [])
+    return mcp_main(args)
 
 
 def _ai(a):

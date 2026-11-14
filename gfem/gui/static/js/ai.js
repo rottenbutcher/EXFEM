@@ -24,6 +24,7 @@ export class AIDialog {
     $("#ai-run").onclick = () => this.run();
     $("#ai-stop").onclick = () => this.api.post("/api/ai/stop");
     $("#ai-undo").onclick = () => this.undo();
+    $("#ai-newchat").onclick = () => { this.session = null; this.line("— new conversation —", "s"); this.setMode("new"); $("#ai-prompt").focus(); };
     $("#ai-file").onchange = e => this.attach([...e.target.files]);
     $("#ai-provider").onchange = () => { this.fillModels(true); this.saveSettings(); };
     document.querySelectorAll("#ai-acc-seg button").forEach(b => b.onclick = () => this.pickAccount(b.dataset.p));
@@ -237,6 +238,7 @@ export class AIDialog {
       provider: prov, model: $("#ai-model").value.trim() || null, effort: $("#ai-effort").value,
       base_url: $("#ai-base").value.trim() || null, max_turns: +$("#ai-turns").value || null, visual: $("#ai-visual").checked,
     };
+    this._lastPrompt = prompt; this._lastMode = mode;
     this.setBusy(true, "Starting…");
     this.line((mode === "modify" ? "» (modify) " : "» ") + prompt + (this.atts.length ? `   [${this.atts.map(a => a.name).join(", ")}]` : ""), "u");
     try { const r = await this.api.post("/api/ai/generate", body); this.rid = r.rid; }
@@ -319,6 +321,9 @@ export class AIDialog {
       app.project.geometry.features = e.features;
       if (this.mode() === "new" && e.name) { app.project.name = e.name; $("#proj-name").value = e.name; }
     }
+    (app.project.ai_history = app.project.ai_history || []).push({
+      time: new Date().toISOString(), prompt: this._lastPrompt, mode: this._lastMode, provider: this.provider(),
+      model: $("#ai-model").value.trim() || "default", builds: e.builds, seconds: e.seconds, usage: e.usage, summary: (e.summary || "").slice(0, 4000) });
     const ok = await app.regenerate();
     this.line(ok ? `✔ applied to the model (${e.features.length} features` + (sim ? `, ${app.project.conditions.length} conditions, ${app.project.analysis.type})` : ")")
       : "✖ the result could not be regenerated in the GUI", ok ? "b" : "e");

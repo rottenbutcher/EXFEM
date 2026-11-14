@@ -298,10 +298,15 @@ gfem ai "aluminium cantilever 200 x 20 x 10, fixed at x=0, 100 N down at the tip
 gfem ai --status
 ```
 
-The gfem tools can also be added to your own Claude Code or Codex sessions:
+The gfem tools can also be added to your own Claude Code or Codex sessions (then ask "build a ... with
+the gfem tools"):
 
 ```bash
-claude mcp add gfem -- python -m gfem.cad.mcp_server
+gfem mcp --register claude
+```
+
+```bash
+gfem mcp --register codex
 ```
 
 API keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
