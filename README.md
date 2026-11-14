@@ -264,12 +264,18 @@ How it works. The model never writes free-form code; it calls gfem tools:
 
 | Tool | What gfem does |
 |---|---|
-| `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image |
+| `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image. Features: box, cylinder, cone, sphere, torus, wedge, sketch extrude / revolve, loft, sweep (path, spline, helix), shell, hole (counterbore, countersink, blind), boolean, fillet, chamfer, transform, pattern, sheet and wire bodies |
 | `get_model` | bodies and faces (id, type, centre, outward normal, area) for picking faces |
 | `set_material`, `add_condition` | library or custom material; supports and loads on faces chosen by id or by filters (normal, box, type, area, nearest) |
 | `set_analysis`, `set_mesh`, `solve` | any gfem analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
 
 Every result goes back to the model, which checks it against your request and corrects itself.
+Other things the dialog does:
+- Thumbnails of every build appear under the preview; click one and **apply this build** to use an
+  earlier version.
+- **Report** downloads a Markdown record of the requests, results and the latest view.
+- When a solve fails, the dialog opens in Simulate mode with the error pre-filled, so the model can
+  find and fix the cause (missing support, empty selection, ...).
 Conditions created with a face filter are re-applied after a geometry change; a condition that no
 longer selects anything blocks the solve. The result is applied to your project (**Undo AI change**
 restores the previous state), and follow-up requests continue the same conversation.

@@ -12,6 +12,9 @@ gfem ai --login claude-cli
 - Flange: outer diameter 120 mm, thickness 15 mm, central hub d60 x 40 mm high with a d30 bore through everything, 6 bolt holes d11 equally spaced on a d95 bolt circle, 3 mm fillet where the hub meets the flange.
 - L-shaped steel bracket, 5 mm plate, horizontal leg 80 x 60 mm, vertical leg 60 mm high, one triangular gusset 40 x 40 mm in the middle, two d9 holes in each leg, 3 mm inner bend fillet.
 - Stepped shaft along X: d40 x 60 long, then d30 x 80, then d25 x 40, 1 mm chamfers on the ends, a 8 x 4 mm keyway 40 mm long on the d30 section.
+- Electronics enclosure: outer 120 x 80 x 40 mm, open top, 2.5 mm walls, 3 mm outer vertical-edge fillets, four countersunk M4 holes (d4.5, countersink d9 x 90 deg) in the floor 12 mm from the side walls, and four d8 x 10 mm high screw bosses with d3 holes in the inside corners.
+- Compression spring: wire d4, mean diameter 40, pitch 10, 6 turns.
+- Transition duct: lofted from a 60 x 40 rectangle at z=0 to a d30 circle at z=80, then shelled to 2 mm walls with both ends open.
 - Model the part in the attached drawing. (attach `plate_drawing.png`: 120 x 80 x 10 plate, expected volume 74 921 mm³)
 
 **Follow-up changes** (Modify mode, same conversation)
