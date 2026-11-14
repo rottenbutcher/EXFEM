@@ -226,8 +226,76 @@ Every CAD body, face, edge and vertex keeps its identity as a node/element set a
   Banded or smooth contours with an ANSYS-style legend, Max/Min markers, a deformation scale
   (auto/true/×N), animation of load history and mode shapes, probes, and tabular and graph views.
 - **Export**: Abaqus `.inp`, Nastran `.bdf`, STEP, STL, ParaView `.vtu`, CSV, PNG.
+- **AI CAD**: describe a part or attach a drawing; Claude / GPT builds it as a feature tree,
+  checks it against rendered views and measurements, and refines it on request.
 - **Examples**: L-bracket, plate with hole (Kt), cantilever modal, column buckling, heat-sink
   thermal-stress, topology optimisation, punch contact, rubber pad (hyperelastic NLGEOM).
+
+## AI CAD (text-to-CAD with Claude or GPT)
+
+Describe a part in plain language (any language), or attach a drawing (photo, screenshot, PDF, DXF),
+and an LLM builds it as a normal, editable gfem feature tree. Open it from **Home > AI CAD** or
+**Geometry > AI CAD**, or use the command line.
+
+![AI CAD](docs/img/ai_cad.png)
+
+How it works: the model never writes free-form code. It calls a single tool, `build_cad`, with a
+JSON feature list (box, cylinder, sketch extrude/revolve, boolean, fillet, chamfer, pattern ...).
+gfem checks every call in three stages and returns the result to the model:
+
+1. **Static validation**: types, numbers, self-intersecting sketches, profiles that cross the
+   revolve axis, and references to unknown or already-consumed bodies, each with a precise message.
+2. **OpenCASCADE regeneration**: kernel errors such as a fillet that is too large.
+3. **Measurement and preview**: bodies, volumes, bounding box, faces, and a rendered 4-view image
+   (iso, front, top, right).
+
+The model compares this with the request and corrects itself, usually in one or two extra builds.
+The result is applied to the project (**Undo AI change** restores the previous geometry). The
+dialog then switches to **Modify current geometry**, so you can keep refining in follow-up
+requests ("make the bolt holes M12", "add 2 mm chamfers on the outer edge").
+
+| Provider | Setting | Default model |
+|---|---|---|
+| Anthropic Claude | `ANTHROPIC_API_KEY` or key saved in the dialog | `claude-opus-5-5` (adaptive thinking, streaming) |
+| OpenAI GPT | `OPENAI_API_KEY` or key saved in the dialog | `gpt-5` (Chat Completions, function calling) |
+| OpenAI-compatible (Ollama, vLLM, LM Studio) | base URL, e.g. `http://localhost:11434/v1` | any local model |
+
+Keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
+never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
+spend your credits.
+
+Install the SDKs:
+
+```bash
+pip install -e ".[ai]"
+```
+
+Generate a part from the command line:
+
+```bash
+gfem ai "flange d120 x 15 mm, hub d60 x 40 with d30 bore, 6 bolt holes d11 on a d95 circle" -o flange.step
+```
+
+From a drawing, writing a GUI project and a preview image:
+
+```bash
+gfem ai "model the part in this drawing, plate thickness 8 mm" --attach drawing.png -o part.gfem.json --preview part.png
+```
+
+Modify an existing project:
+
+```bash
+gfem ai "make all holes 2 mm larger" --modify part.gfem.json -o part_v2.gfem.json
+```
+
+Store a key once (it is read from the prompt or stdin):
+
+```bash
+gfem ai --set-key anthropic
+```
+
+Python API: `gfem.cad.ai.generate(prompt, provider="anthropic", attachments=[...])` returns the
+feature list, a summary, the measurement report and the preview PNG.
 
 ## Python API
 

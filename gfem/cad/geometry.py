@@ -174,6 +174,79 @@ def sort_loops(loops):
     return sorted(loops, key=_loop_area, reverse=True)
 
 
+def loop_polygon(lp, n_arc=16):
+    """Closed polygon approximation (N, 2) of a sketch loop (arcs discretised)."""
+    if "circle" in lp:
+        cx, cy, r = map(float, lp["circle"])
+        t = np.linspace(0, 2 * math.pi, 4 * n_arc, endpoint=False)
+        return np.stack([cx + r * np.cos(t), cy + r * np.sin(t)], 1)
+    if "rect" in lp:
+        x0, y0, x1, y1 = map(float, lp["rect"])
+        return np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+    if "slot" in lp:
+        x0, y0, x1, y1, r = map(float, lp["slot"])
+        d = np.array([x1 - x0, y1 - y0])
+        a0 = math.atan2(d[1], d[0])
+        t1 = np.linspace(a0 - math.pi / 2, a0 + math.pi / 2, n_arc)
+        t0 = t1 + math.pi
+        return np.concatenate([np.stack([x1 + r * np.cos(t1), y1 + r * np.sin(t1)], 1),
+                               np.stack([x0 + r * np.cos(t0), y0 + r * np.sin(t0)], 1)])
+    pts = [np.asarray(p, float)[:2] for p in lp["points"]]
+    if len(pts) > 2 and np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    bul = list(lp.get("bulges") or []) + [0.0] * len(pts)
+    out = []
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        out.append(a)
+        if abs(bul[i]) > 1e-12 and np.linalg.norm(b - a) > 0:
+            c, r, th = _arc_center(a, b, bul[i])
+            a0 = math.atan2(a[1] - c[1], a[0] - c[0])
+            for k in range(1, n_arc):
+                ang = a0 + th * k / n_arc
+                out.append(c + r * np.array([math.cos(ang), math.sin(ang)]))
+    return np.asarray(out)
+
+
+def _point_in_poly(p, poly):
+    x, y = p
+    inside = False
+    xs, ys = poly[:, 0], poly[:, 1]
+    xj, yj = np.roll(xs, 1), np.roll(ys, 1)
+    for xi, yi, xk, yk in zip(xs, ys, xj, yj):
+        if (yi > y) != (yk > y) and x < (xk - xi) * (y - yi) / (yk - yi + 1e-300) + xi:
+            inside = not inside
+    return inside
+
+
+def loop_regions(loops):
+    """Group sketch loops into regions [(outer, [holes])] by nesting depth: a loop inside an
+    even number of loops is an outer boundary, inside an odd number it is a hole of the
+    innermost loop that contains it (islands inside holes become new regions)."""
+    loops = sort_loops(loops)
+    polys = [loop_polygon(lp) for lp in loops]
+    parent, depth = [], []
+    for i, lp in enumerate(loops):
+        probe = polys[i].mean(0) if "circle" in lp else polys[i][0]
+        par = -1
+        for j in range(i - 1, -1, -1):           # smallest containing loop first (sorted by area)
+            if _loop_area(loops[j]) > _loop_area(lp) and all(
+                    _point_in_poly(q, polys[j]) for q in (polys[i][0], polys[i][len(polys[i]) // 2], probe)):
+                par = j
+                break
+        parent.append(par)
+        depth.append(0 if par < 0 else depth[par] + 1)
+    regions = []
+    index = {}
+    for i, lp in enumerate(loops):
+        if depth[i] % 2 == 0:
+            index[i] = len(regions)
+            regions.append((lp, []))
+        else:
+            regions[index[parent[i]]][1].append(lp)
+    return regions
+
+
 # ------------------------------------------------------------------ DXF
 def dxf_loops(path, layer=None, tol=1e-6):
     """Closed profiles from a DXF file: LWPOLYLINE/POLYLINE (bulges), CIRCLE, and chains of
@@ -262,10 +335,10 @@ class CadModel:
             owner = {}                 # tag -> feature id
             self.stl_mode = any(f.get("type") == "import" and str(f.get("file", "")).lower().endswith(".stl")
                                 for f in self.features if not f.get("suppressed"))
-            for f in self.features:
+            for k, f in enumerate(self.features):
                 if f.get("suppressed"):
                     continue
-                fid = f.get("id") or f"F{len(bodies) + 1}"
+                fid = f.get("id") or f"F{k + 1}"
                 try:
                     out = self._feature(g, f, bodies)
                 except Exception as e:      # noqa: BLE001
@@ -355,29 +428,36 @@ class CadModel:
                                           bulges=L.get("bulges")))
             if not loops:
                 raise GeometryError("empty sketch")
-            loops = sort_loops(loops)
-            # separate disjoint outer regions: a loop is a hole if inside the first loop's bbox area
+            # disjoint outer regions, holes and islands (nesting depth)
             b = _Builder(g, frame)
-            outer, holes = loops[0], loops[1:]
-            surf = b.face([outer] + holes)
+            surfs = [(2, b.face([outer] + holes)) for outer, holes in loop_regions(loops)]
             if t == "revolve":
                 ax = f.get("axis", [[0, 0], [0, 1]])
                 p0 = o + ax[0][0] * ex + ax[0][1] * ey
                 p1 = o + ax[1][0] * ex + ax[1][1] * ey
                 d = p1 - p0
-                out = occ.revolve([(2, surf)], *p0, *d, math.radians(num("angle", 360.0)))
+                if np.linalg.norm(d) < 1e-12:
+                    raise GeometryError("revolve axis has zero length")
+                out = occ.revolve(surfs, *p0, *d, math.radians(num("angle", 360.0)))
             else:
                 dist = num("distance", 10.0)
+                if abs(dist) < 1e-12:
+                    raise GeometryError("extrude distance is zero")
                 if f.get("symmetric"):
-                    occ.translate([(2, surf)], *(-ez * dist / 2))
-                out = occ.extrude([(2, surf)], *(ez * dist))
-            return [x for x in out if x[0] == 3]
+                    occ.translate(surfs, *(-ez * dist / 2))
+                out = occ.extrude(surfs, *(ez * dist))
+            out = [x for x in out if x[0] == 3]
+            if len(out) > 1 and f.get("fuse_regions", False):
+                out, _ = occ.fuse(out[:1], out[1:])
+                out = [x for x in out if x[0] == 3]
+            return out
         if t == "surface":                     # planar sheet body from a sketch (shell mesh)
             frame = plane_frame(f.get("plane", "XY"))
             if f.get("offset"):
                 o, ex, ey, ez = frame
                 frame = (o + ez * float(f["offset"]), ex, ey, ez)
-            return [(2, _Builder(g, frame).face(sort_loops(f["loops"])))]
+            b = _Builder(g, frame)
+            return [(2, b.face([outer] + holes)) for outer, holes in loop_regions(f["loops"])]
         if t == "line":                        # polyline wire body (beam mesh)
             pts = [occ.addPoint(*map(float, p)) for p in f["points"]]
             if f.get("closed"):
@@ -406,6 +486,10 @@ class CadModel:
                     surfs.append(up[0])
                 out = occ.chamfer([v[1] for v in vols], edges, surfs, [num("d", 1.0)], removeVolume=True)
             return [x for x in out if x[0] == 3]
+        if t in ("transform", "pattern"):
+            for i in (f["target"] if isinstance(f["target"], list) else [f["target"]]):
+                if i not in bodies:
+                    raise GeometryError(f"unknown or consumed feature {i}")
         if t == "transform":
             vols = list(bodies.get(f["target"][0] if isinstance(f["target"], list) else f["target"], []))
             for i in (f["target"] if isinstance(f["target"], list) else [f["target"]])[1:]:
@@ -463,6 +547,8 @@ class CadModel:
         edges = sorted(edges)
         if spec == "all":
             return edges
+        if isinstance(spec, dict) and not ("com" in spec or "id" in spec):
+            return self._edge_filter(g, edges, spec)
         sigs = spec if isinstance(spec, list) else [spec]
         cand = [(e, entity_signature(g, 1, e)) for e in edges]
         out = []
@@ -471,9 +557,51 @@ class CadModel:
                 if int(s) in edges:
                     out.append(int(s))
                 continue
+            if isinstance(s, dict) and not ("com" in s or "id" in s):
+                out += [e for e in self._edge_filter(g, edges, s) if e not in out]
+                continue
+            if isinstance(s, dict) and "id" in s and "com" not in s:
+                if int(s["id"]) in edges:
+                    out.append(int(s["id"]))
+                continue
             best = match_one(s, cand)
-            if best is not None:
+            if best is not None and best not in out:
                 out.append(best)
+        return out
+
+    @staticmethod
+    def _edge_filter(g, edges, spec):
+        """Edge filter: {"parallel": "x"|"y"|"z"|[vx,vy,vz], "box": [xmin,ymin,zmin,xmax,ymax,zmax],
+        "type": "Line"|"Circle"|..., "min_length": L, "max_length": L}  (all given criteria must hold)."""
+        out = []
+        par = spec.get("parallel")
+        if isinstance(par, str):
+            par = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[par.lower()]
+        if par is not None:
+            par = np.asarray(par, float) / np.linalg.norm(par)
+        box = spec.get("box")
+        for e in edges:
+            if spec.get("type") and g.model.getType(1, e).lower() != str(spec["type"]).lower():
+                continue
+            bb = np.asarray(g.model.getBoundingBox(1, e))
+            if box is not None:
+                b = np.asarray(box, float)
+                if np.any(bb[:3] < b[:3] - 1e-6) or np.any(bb[3:] > b[3:] + 1e-6):
+                    continue
+            L = g.model.occ.getMass(1, e)
+            if spec.get("min_length") is not None and L < float(spec["min_length"]):
+                continue
+            if spec.get("max_length") is not None and L > float(spec["max_length"]):
+                continue
+            if par is not None:
+                ends = [abs(t) for _, t in g.model.getBoundary([(1, e)], oriented=False)]
+                if len(ends) != 2:
+                    continue
+                d = np.subtract(g.model.getValue(0, ends[1], []), g.model.getValue(0, ends[0], []))
+                n = np.linalg.norm(d)
+                if n < 1e-12 or abs(abs(d @ par) / n - 1) > 1e-6 or g.model.getType(1, e) != "Line":
+                    continue
+            out.append(e)
         return out
 
     def _import(self, g, f):
@@ -598,24 +726,32 @@ class CadModel:
                 except Exception as e:  # noqa: BLE001
                     self.messages.append(f"display tessellation incomplete: {e}")
             faces, edges = [], []
+            # global node table: triangles of a face may use nodes that getNodes(face,
+            # includeBoundary=True) does not return (degenerate edges, e.g. on a revolve axis)
+            try:
+                all_t, all_c, _ = g.model.mesh.getNodes()
+            except Exception:  # noqa: BLE001
+                all_t, all_c = np.zeros(0, np.int64), np.zeros(0)
+            all_t = np.asarray(all_t, np.int64)
+            all_c = np.asarray(all_c, float).reshape(-1, 3)
+            pos = np.full(int(all_t.max()) + 1 if len(all_t) else 1, -1, np.int64)
+            pos[all_t] = np.arange(len(all_t))
             for _, tag in g.model.getEntities(2):
                 try:
-                    nt, nc, _ = g.model.mesh.getNodes(2, tag, includeBoundary=True)
                     et, _, en = g.model.mesh.getElements(2, tag)
                 except Exception:  # noqa: BLE001
                     continue
-                if not len(nt):
-                    continue
-                loc = {int(n): i for i, n in enumerate(nt)}
-                tris = []
-                for t_, conn in zip(et, en):
-                    if t_ == 2:
-                        tris.append(np.asarray(conn, np.int64).reshape(-1, 3))
+                tris = [np.asarray(conn, np.int64).reshape(-1, 3) for t_, conn in zip(et, en) if t_ == 2]
                 if not tris:
                     continue
                 tris = np.concatenate(tris)
-                idx = np.vectorize(loc.get)(tris)
-                faces.append(dict(id=tag, xyz=np.asarray(nc, np.float32).reshape(-1, 3), tri=idx.astype(np.int32)))
+                if tris.max() >= len(pos) or np.any(pos[tris] < 0):
+                    tris = tris[np.all((tris < len(pos)) & (pos[np.minimum(tris, len(pos) - 1)] >= 0), axis=1)]
+                    if not len(tris):
+                        continue
+                used, inv = np.unique(tris, return_inverse=True)
+                faces.append(dict(id=tag, xyz=all_c[pos[used]].astype(np.float32),
+                                  tri=inv.reshape(-1, 3).astype(np.int32)))
             for _, tag in g.model.getEntities(1):
                 try:
                     nt, nc, par = g.model.mesh.getNodes(1, tag, includeBoundary=True)

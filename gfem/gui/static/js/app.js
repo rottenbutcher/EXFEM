@@ -2,6 +2,7 @@
 import { Viewer, b64f32 } from "./viewer.js";
 import { Chart, fmt, fmtR } from "./charts.js";
 import { openSketcher } from "./sketch.js";
+import { AIDialog } from "./ai.js";
 
 // ------------------------------------------------------------------ API
 const api = {
@@ -41,6 +42,7 @@ class App {
     this.chartTime = new Chart($("#chart-time"), { title: "Time / load factor", xlabel: "increment" });
     this.chartGraph = new Chart($("#chart-graph"), { title: "Result vs time", xlabel: "time" });
     this._bindStatic();
+    this.ai = new AIDialog(this);
     this.init();
   }
 
@@ -77,6 +79,7 @@ class App {
       if (e.status !== "running") { this.status.solve = e.status === "done" ? "ok" : "failed"; this.loadResults(); }
       this.renderTree();
     } else if (e.type === "mesh") { this.loadMesh(false); }
+    else if (e.type === "ai") this.ai.onEvent(e);
   }
 
   throttle(k, fn, ms) { this._th = this._th || {}; if (this._th[k]) return; this._th[k] = setTimeout(() => { this._th[k] = null; fn(); }, ms); }
@@ -359,9 +362,10 @@ class App {
     const t = {
       home: G("Project", B("new", "New", "🗋") + B("open", "Open", "📂") + B("save", "Save", "💾")) +
         G("Import", B("import-cad", "CAD", "⬢", "Import STEP / IGES / BREP / STL / DXF") + B("import-deck", "Solver deck", "🗎", "Import Abaqus .inp, Nastran .bdf, ANSYS .cdb, gmsh .msh")) +
+        G("AI", B("ai-cad", "AI CAD", "✨", "Describe a part (or attach a drawing) – Claude / GPT builds it")) +
         G("Workflow", B("geom", "Geometry", "◈") + B("mesh", "Mesh", "▦") + B("solve", "Solve", "⚡", "Solve (F5)") + B("results", "Results", "◐")) +
         G("Units", `<select id="rb-units" class="rbsel"><option value="mm">mm · N · s · MPa · t</option><option value="m">m · N · s · Pa · kg (SI)</option></select>`),
-      geometry: G("Primitives", B("f-box", "Box", "⬛") + B("f-cylinder", "Cylinder", "⬤") + B("f-sphere", "Sphere", "●") + B("f-cone", "Cone", "▲") + B("f-torus", "Torus", "◯")) +
+      geometry: G("AI", B("ai-cad", "AI CAD", "✨", "Describe a part (or attach a drawing) – Claude / GPT builds it")) + G("Primitives", B("f-box", "Box", "⬛") + B("f-cylinder", "Cylinder", "⬤") + B("f-sphere", "Sphere", "●") + B("f-cone", "Cone", "▲") + B("f-torus", "Torus", "◯")) +
         G("Sketch", B("sketch", "Sketch…", "✎", "2D sketch → extrude / revolve / surface") + B("import-dxf", "DXF", "⌗", "Extrude a DXF drawing")) +
         G("Thin structures", B("f-surface", "Surface", "▱", "Planar surface body (shell, from a sketch)") + B("f-line", "Line", "╱", "Line body (beam) from points")) +
         G("Operations", B("f-union", "Union", "∪", "Fuse selected bodies") + B("f-subtract", "Subtract", "∖", "First selected body minus the others") + B("f-intersect", "Intersect", "∩") +
@@ -453,6 +457,7 @@ class App {
     if (a === "stop") return this.stop();
     if (a === "results") return this.setMode("result");
     if (a === "sketch") return openSketcher(this, null);
+    if (a === "ai-cad") return this.ai.open();
     if (a === "exp-step") return this.exportFile("step");
     if (a === "exp-vtu") return this.exportFile("vtu");
     if (a === "shot") return $("#btn-shot").click();

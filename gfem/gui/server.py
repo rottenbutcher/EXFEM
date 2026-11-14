@@ -91,6 +91,8 @@ class Session:
         self.stop_flag = threading.Event()
         self.status = "idle"
         self.result_project = None
+        self.ai_job = None
+        self.ai_stop = threading.Event()
 
     # ---------------------------------------------------------- events
     def emit(self, kind, **data):
@@ -387,6 +389,56 @@ class Session:
                     lines=b64(d.get("lines", np.zeros((0, 2))), np.int32),
                     line_edge=b64(d.get("line_edge", np.zeros(0)), np.int32))
 
+    # ---------------------------------------------------------- AI CAD
+    def ai_generate(self, body):
+        """Run the text-to-CAD agent in a background thread; progress as 'ai' events."""
+        from ..cad import ai as AI
+        if self.ai_job is not None and self.ai_job.is_alive():
+            raise P.ProjectError("an AI request is already running")
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            raise P.ProjectError("describe the part first")
+        atts = []
+        for path in body.get("attachments") or []:
+            path = os.path.abspath(path)
+            if not path.startswith(os.path.join(self.workdir, "uploads")):
+                raise P.ProjectError("attachments must be uploaded through the GUI")
+            atts.append(AI.load_attachment(path))
+        base = body.get("base_features") if body.get("mode") == "modify" else None
+        units = self.project.get("units", "mm")
+        self.ai_stop.clear()
+        rid = int(time.time() * 1000)
+
+        def ev(step, **kw):
+            self.emit("ai", step=step, rid=rid, **kw)
+
+        def on_build(rep):
+            ev("build", ok=rep["ok"], errors=rep["errors"][:5], warnings=rep["warnings"][:5],
+               size=rep.get("size"), volume=rep.get("volume"), bodies=len(rep.get("bodies") or []),
+               png=base64.b64encode(rep["png"]).decode() if rep.get("png") else None,
+               features=rep["features"] if rep["ok"] else None, name=rep.get("name"))
+
+        def run():
+            try:
+                ev("start", prompt=prompt)
+                res = AI.generate(prompt, provider=body.get("provider") or None, model=body.get("model") or None,
+                                  effort=body.get("effort") or None, base_url=body.get("base_url") or None,
+                                  attachments=atts, base_features=base, units=units,
+                                  max_turns=body.get("max_turns") or None, visual=body.get("visual"),
+                                  log=lambda m: ev("log", msg=m), on_build=on_build,
+                                  should_stop=self.ai_stop.is_set)
+                ev("done", ok=res["ok"], error=res.get("error"), features=res["features"], name=res.get("name"),
+                   units=res.get("units"), summary=res.get("summary"), usage=res.get("usage"),
+                   seconds=res.get("seconds"), builds=res.get("builds"),
+                   png=base64.b64encode(res["png"]).decode() if res.get("png") else None)
+            except Exception as e:  # noqa: BLE001
+                ev("done", ok=False, error=str(e))
+                if not isinstance(e, AI.AIError):
+                    traceback.print_exc()
+        self.ai_job = threading.Thread(target=run, daemon=True)
+        self.ai_job.start()
+        return rid
+
     # ---------------------------------------------------------- solve
     def start(self, fn, name):
         if self.job is not None and self.job.is_alive():
@@ -555,15 +607,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, [dict(key=k, title=v[0], text=v[1]) for k, v in EXAMPLES.items()])
             if u.path == "/api/system":
                 return self._send(200, _system())
+            if u.path == "/api/ai/settings":
+                from ..cad import ai as AI
+                return self._send(200, AI.public_settings())
             return self._send(404, {"error": "not found"})
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             return self._send(400, {"error": str(e)})
 
+    def _same_origin(self):
+        """Reject cross-site POSTs (a web page in another tab must not drive the local server,
+        spend the user's AI credits or read files). Browsers always send Origin on POST."""
+        origin = self.headers.get("Origin")
+        if origin is None:                    # scripts, curl, tests (not a browser cross-site request)
+            return self.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
+        return urllib.parse.urlparse(origin).netloc == self.headers.get("Host", "")
+
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
         s = self.session
+        if not self._same_origin():
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            if n:
+                self.rfile.read(n)
+            return self._send(403, {"error": "cross-origin request refused"})
         try:
             if u.path == "/api/upload":
                 name = os.path.basename(q.get("name", "upload.bin"))
@@ -636,6 +704,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, dict(path=path))
             if u.path == "/api/detect_contacts":
                 return self._send(200, dict(pairs=_detect_contacts(s, float(body.get("tol", 0)))))
+            if u.path == "/api/ai/settings":
+                from ..cad import ai as AI
+                keys = {body["provider"]: body["key"]} if body.get("provider") and "key" in body else None
+                AI.save_settings(keys=keys, **{k: body[k] for k in ("provider", "model", "effort", "base_url", "max_turns", "visual")
+                                              if k in body and k != "key"})
+                return self._send(200, AI.public_settings())
+            if u.path == "/api/ai/generate":
+                return self._send(200, dict(rid=s.ai_generate(body)))
+            if u.path == "/api/ai/stop":
+                s.ai_stop.set()
+                return self._send(200, dict(ok=True))
             if u.path == "/api/dxf":
                 from ..cad.geometry import dxf_loops
                 loops, sc = dxf_loops(body["path"])
@@ -847,6 +926,14 @@ def serve(host="127.0.0.1", port=8765, workdir="gfem_work", open_browser=True):
     httpd.daemon_threads = True
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}/"
     print(f"gfem GUI running at {url}  (workdir {session.workdir}); Ctrl+C to quit")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        try:
+            from ..cad import ai as AI
+            if any(p["has_key"] for p in AI.public_settings()["providers"].values()):
+                print("warning: the GUI is reachable from the network and an AI API key is configured; "
+                      "anyone who can reach this port can run AI CAD requests on your account")
+        except Exception:  # noqa: BLE001
+            pass
     if open_browser:
         try:
             import webbrowser
