@@ -432,20 +432,35 @@ class Session:
                png=base64.b64encode(rep["png"]).decode() if rep.get("png") else None,
                features=rep["features"] if rep["ok"] else None, name=rep.get("name"))
 
+        run_dir = os.path.join(self.workdir, "ai_runs", str(rid))
+
+        def on_sim(d):
+            png = d.get("png")
+            pf = (d.get("result") or {}).get("png_file") if isinstance(d.get("result"), dict) else None
+            if png is None and pf:
+                try:
+                    with open(os.path.join(run_dir, pf), "rb") as f:
+                        png = f.read()
+                except OSError:
+                    png = None
+            ev("sim", tool=d.get("tool"), error=d.get("error"),
+               png=base64.b64encode(png).decode() if png else None)
+
         def run():
             try:
                 ev("start", prompt=prompt)
                 res = AI.generate(prompt, provider=body.get("provider") or None, model=body.get("model") or None,
-                                  run_dir=os.path.join(self.workdir, "ai_runs", str(rid)),
+                                  run_dir=run_dir, on_sim=on_sim,
                                   effort=body.get("effort") or None, base_url=body.get("base_url") or None,
                                   attachments=atts, base_features=base, units=units,
                                   max_turns=body.get("max_turns") or None, visual=body.get("visual"),
                                   log=lambda m: ev("log", msg=m), on_build=on_build,
-                                  should_stop=self.ai_stop.is_set, project=sim_project)
+                                  should_stop=self.ai_stop.is_set, project=sim_project,
+                                  session=body.get("session") or None)
                 ev("done", ok=res["ok"], error=res.get("error"), features=res["features"], name=res.get("name"),
                    units=res.get("units"), summary=res.get("summary"), usage=res.get("usage"),
                    seconds=res.get("seconds"), builds=res.get("builds"), project=res.get("project"),
-                   solve_summary=res.get("solve_summary"),
+                   solve_summary=res.get("solve_summary"), session=res.get("session"),
                    png=base64.b64encode(res["png"]).decode() if res.get("png") else None)
             except Exception as e:  # noqa: BLE001
                 ev("done", ok=False, error=str(e))

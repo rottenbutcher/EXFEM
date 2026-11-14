@@ -200,7 +200,7 @@ def _toml_str(s):
 
 
 def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, model=None, effort=None,
-                  visual=True, images=(), project=None):
+                  visual=True, images=(), project=None, session=None):
     """-> (argv, stdin_text|None, env). With `project` the simulation tools are enabled."""
     x = exe(provider)
     if not x:
@@ -217,7 +217,9 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
                 "--system-prompt", template.format(system=SYSTEM_PROMPT),
                 "--tools", "", "--mcp-config", cfg, "--strict-mcp-config",
                 "--allowedTools", *[f"mcp__gfem__{t}" for t in tools],
-                "--no-session-persistence", "--setting-sources", ""]
+                "--setting-sources", ""]
+        if session:                                    # continue the conversation (follow-up request)
+            argv += ["--resume", session]
         if model:
             argv += ["--model", model]
         if effort:
@@ -246,7 +248,10 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
           "approval_policy=\"never\""]
     if effort:
         ov.append(f"model_reasoning_effort={_toml_str({'xhigh': 'high', 'max': 'high'}.get(effort, effort))}")
-    argv = [x, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-C", run_dir]
+    if session:                                        # resume: no -s/-C on this subcommand
+        argv = [x, "exec", "resume", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="read-only"']
+    else:
+        argv = [x, "exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-C", run_dir]
     for o in ov:
         argv += ["-c", o]
     if model:
@@ -261,8 +266,8 @@ def build_command(provider, prompt_text, run_dir, units="mm", base_file=None, mo
             paths.append(p)
     for p in paths:
         argv += ["-i", p]
-    full = template.format(system=SYSTEM_PROMPT) + "\n\n" + prompt_text
-    argv += ["--", full]
+    full = prompt_text if session else template.format(system=SYSTEM_PROMPT) + "\n\n" + prompt_text
+    argv += ([session] if session else []) + ["--", full]
     env.pop("OPENAI_API_KEY", None)
     return argv, None, env
 
@@ -354,6 +359,8 @@ class _Watcher(threading.Thread):
 
 def _parse_claude(e, log, texts, usage):
     t = e.get("type")
+    if e.get("session_id") and not usage.get("_session"):
+        usage["_session"] = e["session_id"]
     if t == "system" and e.get("subtype") == "init":
         st = {s.get("name"): s.get("status") for s in e.get("mcp_servers") or []}
         if st.get("gfem") not in (None, "connected"):
@@ -380,6 +387,8 @@ def _parse_claude(e, log, texts, usage):
 def _parse_codex(e, log, texts, usage):
     t = e.get("type", "")
     item = e.get("item") or {}
+    if t == "thread.started" and e.get("thread_id"):
+        usage["_session"] = e["thread_id"]
     if t == "item.completed" and item.get("type") == "agent_message" and item.get("text", "").strip():
         texts.append(item["text"])
         log("AI: " + item["text"].strip())
@@ -407,7 +416,7 @@ def _parse_codex(e, log, texts, usage):
 
 def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", model=None, effort=None,
             visual=True, log=None, on_build=None, should_stop=None, timeout=1800, run_dir=None,
-            project=None, on_sim=None):
+            project=None, on_sim=None, session=None):
     """Generate a part through a signed-in CLI. Same result dict as `gfem.cad.ai.run_agent`.
     project: a gfem project dict -> simulation mode (the model may also set up and solve the
     analysis); the final project is returned in result['project']."""
@@ -439,7 +448,10 @@ def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", mo
         base_file = None                                 # the project carries the current geometry
         text = text.replace("Units: ", "Simulation request. Units: ", 1) if not base_features else text
     argv, stdin, env = build_command(provider, text, run_dir, units, base_file, model, effort, visual,
-                                     [a for a in atts if a["kind"] in ("image", "pdf")], project=proj_path)
+                                     [a for a in atts if a["kind"] in ("image", "pdf")], project=proj_path,
+                                     session=session)
+    if session:
+        log("AI: continuing the previous conversation")
     builds = []
 
     def ob(rep):
@@ -504,7 +516,7 @@ def run_cli(provider, prompt, attachments=(), base_features=None, units="mm", mo
     res = AIResult(ok=best is not None, features=best["features"] if best else [], name=(best or {}).get("name"),
                    units=(best or {}).get("units", units), summary=(texts[-1].strip() if texts else ""),
                    report=best, png=(best or {}).get("png"), builds=len(builds), usage=usage,
-                   seconds=round(time.time() - t0, 2), run_dir=run_dir)
+                   seconds=round(time.time() - t0, 2), run_dir=run_dir, session=usage.pop("_session", None) or session)
     if proj_path:
         from .. import project as P
         try:

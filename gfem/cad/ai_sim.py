@@ -353,7 +353,37 @@ class SimTools:
         self.s.solve()
         self.solved = True
         self.save()
-        return self.summary()
+        out = self.summary()
+        png = self.result_image()
+        if png:
+            out["_png"] = png
+            out["image"] = getattr(self, "_caption", "")
+        return out
+
+    def result_image(self):
+        """Contour picture of the main result on the deformed shape (iso/front/top/right)."""
+        from .ai import render_field
+        s, d = self.s, self.s.display
+        if not s.frames or d is None or not len(d.get("tri", [])):
+            return None
+        kind = self.p["analysis"]["type"]
+        fr = s.frames[0] if kind in ("modal", "buckling") else s.frames[-1]
+        rtype = {"thermal": "temperature", "thermal_transient": "temperature", "topopt": "density",
+                 "modal": "total_deformation", "buckling": "total_deformation"}.get(kind, "von_mises")
+        val = P.result_field(fr, rtype, self.p)
+        if val is None:
+            rtype, val = "total_deformation", P.result_field(fr, "total_deformation", self.p)
+        if val is None:
+            return None
+        nodes = d["nodes"]
+        try:
+            U = np.asarray(fr["U"])[nodes] if "U" in fr and rtype != "temperature" else None
+            png = render_field(d["xyz"], d["tri"], np.asarray(val)[nodes], disp=U)
+        except Exception:  # noqa: BLE001
+            return None
+        self._caption = (f"image: {P.RESULTS.get(rtype, rtype)} contour on the deformed shape (exaggerated), "
+                         f"blue = min {float(np.min(val)):.4g}, red = max {float(np.max(val)):.4g}; views iso / front / top / right")
+        return png
 
     def summary(self):
         s, p = self.s, self.p

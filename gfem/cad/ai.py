@@ -632,7 +632,7 @@ def _view_basis(name):
     return r, u, d
 
 
-def _raster(tris, edges, name, size, center, scale):
+def _raster(tris, edges, name, size, center, scale, tri_colors=None):
     r, u, d = _view_basis(name)
     img = np.full((size, size, 3), 250, np.uint8)
     zb = np.full((size, size), np.inf)
@@ -672,7 +672,15 @@ def _raster(tris, edges, name, size, center, scale):
             sub = zb[ymin:ymax, xmin:xmax]
             m &= z < sub
             sub[m] = z[m]
-            img[ymin:ymax, xmin:xmax][m] = (base * shade[k]).astype(np.uint8)
+            if tri_colors is None:
+                img[ymin:ymax, xmin:xmax][m] = (base * shade[k]).astype(np.uint8)
+            else:
+                tc = tri_colors[k]
+                if tc.ndim == 2:                        # per-vertex colours: Gouraud interpolation
+                    col = a[m][:, None] * tc[0] + b[m][:, None] * tc[1] + c[m][:, None] * tc[2]
+                else:
+                    col = tc
+                img[ymin:ymax, xmin:xmax][m] = np.clip(col * (0.6 + 0.4 * shade[k]), 0, 255).astype(np.uint8)
     for e in edges:
         P = proj(np.asarray(e, float))
         for (xa, ya, za), (xb, yb, zb_) in zip(P[:-1], P[1:]):
@@ -711,6 +719,41 @@ def render_views(faces, edges, size=320):
     views = [_raster(tris, eds, v, size, center, scale) for v in ("iso", "front", "top", "right")]
     img = np.concatenate([np.concatenate(views[:2], 1), np.concatenate(views[2:], 1)], 0)
     return _png(img)
+
+
+def _rainbow(t):
+    """0..1 -> RGB (blue, cyan, green, yellow, red), like the GUI legend."""
+    t = np.clip(np.asarray(t, float), 0, 1)
+    stops = np.array([[0, 0, 255], [0, 200, 255], [0, 210, 60], [255, 230, 0], [230, 0, 0]], float)
+    x = t * (len(stops) - 1)
+    i = np.minimum(x.astype(int), len(stops) - 2)
+    f = (x - i)[..., None]
+    return stops[i] * (1 - f) + stops[i + 1] * f
+
+
+def render_field(xyz, tri, values, size=300, disp=None, scale_disp=None):
+    """4-view PNG of a nodal field on a surface triangulation (deformed by `disp` if given)."""
+    X = np.asarray(xyz, float)
+    if disp is not None:
+        D = np.asarray(disp, float)
+        dmax = float(np.linalg.norm(D, axis=1).max()) if len(D) else 0.0
+        ext = float(np.linalg.norm(X.max(0) - X.min(0))) or 1.0
+        k = scale_disp if scale_disp is not None else (0.08 * ext / dmax if dmax > 0 else 0.0)
+        X = X + k * D
+    v = np.asarray(values, float)
+    lo, hi = float(v.min()), float(v.max())
+    t = (v - lo) / (hi - lo) if hi > lo else np.zeros_like(v)
+    tri = np.asarray(tri, np.int64)
+    T = X[tri]
+    cols = _rainbow(t[tri])                         # (ntri, 3 vertices, rgb)
+    lo3, hi3 = X.min(0), X.max(0)
+    center, rad = (lo3 + hi3) / 2, max(np.linalg.norm(hi3 - lo3) / 2, 1e-9)
+    sc = size * 0.44 / rad
+    views = [_raster(T, [], vv, size, center, sc, tri_colors=cols) for vv in ("iso", "front", "top", "right")]
+    img = np.concatenate([np.concatenate(views[:2], 1), np.concatenate(views[2:], 1)], 0)
+    # colour bar along the bottom edge (blue = min, red = max)
+    bar = _rainbow(np.linspace(0, 1, img.shape[1]))[None].repeat(10, 0).astype(np.uint8)
+    return _png(np.concatenate([img, bar], 0))
 
 
 # ================================================================== attachments
@@ -1129,11 +1172,12 @@ def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=
                     r, err = sim.call(c.name, c.args), None
                 except Exception as e:  # noqa: BLE001
                     r, err = None, f"{type(e).__name__}: {e}"
-                d = dict(tool=c.name, args=c.args, result=r, error=err)
+                rpng = r.pop("_png", None) if isinstance(r, dict) else None
+                d = dict(tool=c.name, args=c.args, result=r, error=err, png=rpng)
                 log("AI: " + describe_sim(d))
                 if on_sim:
                     on_sim(d)
-                results.append((c, "ERROR: " + err if err else json.dumps(r, default=float), None, bool(err)))
+                results.append((c, "ERROR: " + err if err else json.dumps(r, default=float), rpng if visual else None, bool(err)))
                 continue
             if c.name != TOOL_NAME:
                 results.append((c, f"unknown tool {c.name}; the only tool is {TOOL_NAME}", None, True))
@@ -1183,7 +1227,8 @@ _SIM_NAMES = {"get_model", "set_material", "add_condition", "remove_condition", 
 
 def generate(prompt, provider=None, model=None, api_key=None, base_url=None, effort=None, attachments=(),
              base_features=None, units="mm", max_turns=None, visual=None, log=None, on_text=None,
-             on_build=None, should_stop=None, client=None, backend=None, run_dir=None, project=None, on_sim=None):
+             on_build=None, should_stop=None, client=None, backend=None, run_dir=None, project=None, on_sim=None,
+             session=None):
     """One-call text-to-CAD. Missing options come from the saved settings.
     provider: 'claude-cli' / 'codex-cli' (signed-in account, no key), 'anthropic' / 'openai' /
     'compatible' (API key or local server)."""
@@ -1196,7 +1241,7 @@ def generate(prompt, provider=None, model=None, api_key=None, base_url=None, eff
         return run_cli(provider, prompt, attachments=attachments, base_features=base_features, units=units,
                        model=model, effort=effort or s.get("effort") or None,
                        visual=s.get("visual", True) if visual is None else visual, log=log, on_build=on_build,
-                       should_stop=should_stop, run_dir=run_dir, project=project, on_sim=on_sim)
+                       should_stop=should_stop, run_dir=run_dir, project=project, on_sim=on_sim, session=session)
     if model is None and provider == s.get("provider"):
         model = s.get("model") or None             # the saved model belongs to the saved provider
     effort = effort or s.get("effort") or "high"

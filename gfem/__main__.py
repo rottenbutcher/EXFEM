@@ -8,6 +8,9 @@
   gfem info                            devices / versions
   gfem ai "describe the part" [-o part.step|part.gfem.json|features.json] [--attach drawing.png]
           [--provider anthropic|openai|compatible] [--model M] [--modify project.gfem.json]
+  gfem ai "..." --simulate -o study.gfem.json   geometry + materials + loads + solve + check
+  gfem ai --login claude-cli|codex-cli  sign in with your Claude / ChatGPT account
+  gfem ai --status                     sign-in / API key status
   gfem ai --set-key anthropic|openai    store an API key in ~/.gfem/ai.json (0600)
 """
 import argparse
@@ -48,7 +51,14 @@ def main(argv=None):
     ai.add_argument("prompt", nargs="*", help="description of the part (or of the change with --modify)")
     ai.add_argument("-o", "--out", help="output: .step/.stp/.iges/.brep/.stl (CAD), .gfem.json (project), .json (features)")
     ai.add_argument("--attach", action="append", default=[], help="drawing/photo (png/jpg/webp/gif), PDF, DXF, STEP or text")
-    ai.add_argument("--provider", choices=["anthropic", "openai", "compatible"])
+    ai.add_argument("--provider", choices=["claude-cli", "codex-cli", "anthropic", "openai", "compatible"],
+                    help="claude-cli / codex-cli: your signed-in Claude or ChatGPT account (default); "
+                         "anthropic / openai / compatible: API key or local server")
+    ai.add_argument("--simulate", action="store_true",
+                    help="also set up, solve and check the analysis (materials, supports, loads, mesh)")
+    ai.add_argument("--login", metavar="PROVIDER", choices=["claude-cli", "codex-cli"],
+                    help="sign in with your Claude (claude-cli) or ChatGPT (codex-cli) account and exit")
+    ai.add_argument("--status", action="store_true", help="show the AI sign-in / key status and exit")
     ai.add_argument("--model")
     ai.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ai.add_argument("--base-url", help="OpenAI-compatible server URL (e.g. http://localhost:11434/v1)")
@@ -107,6 +117,30 @@ def _ai(a):
     import json
     import os
     from .cad import ai as AI
+    if a.status:
+        from .cad import ai_cli
+        for k in ai_cli.CLIS:
+            st = ai_cli.status(k)
+            state = "signed in" if st["logged_in"] else ("not signed in" if st["installed"] else f"not installed ({st['install']})")
+            print(f"{k:11s} {st['label']}: {state}" + (f"  [{st['version']}]" if st.get("version") else ""))
+        pub = AI.public_settings()
+        for k, v in pub["providers"].items():
+            print(f"{k:11s} {v['label']}: " + ("key available (" + v["key_source"] + ")" if v["has_key"] else "no key"))
+        print(f"default provider: {pub['provider']}")
+        return 0
+    if a.login:
+        from .cad import ai_cli
+        x = ai_cli.exe(a.login)
+        if not x:
+            print(f"not installed: {ai_cli.status(a.login)['install']}")
+            return 1
+        import subprocess
+        rc = subprocess.call([x, "auth", "login"] if a.login == "claude-cli" else [x, "login"])
+        st = ai_cli.status(a.login)
+        print("signed in" if st["logged_in"] else "sign-in did not complete")
+        if st["logged_in"]:
+            AI.save_settings(provider=a.login)
+        return 0 if st["logged_in"] else (rc or 1)
     if a.set_key:
         key = sys.stdin.readline().strip() if not sys.stdin.isatty() else getpass.getpass(f"{a.set_key} API key: ")
         AI.save_settings(keys={a.set_key: key})
@@ -127,9 +161,16 @@ def _ai(a):
         else:
             project = d
             base, units = d["geometry"]["features"], a.units or d.get("units", units)
+    sim_project = None
+    if a.simulate:
+        from . import project as P
+        sim_project = project or P.new_project(units)
+        if base and not project:
+            sim_project["geometry"]["features"] = base
+        base = None
     res = AI.generate(prompt, provider=a.provider, model=a.model, base_url=a.base_url, effort=a.effort,
                       attachments=a.attach, base_features=base, units=units, max_turns=a.max_turns,
-                      visual=False if a.no_visual else None, log=print)
+                      visual=False if a.no_visual else None, log=print, project=sim_project)
     if res.get("usage"):
         u = res["usage"]
         print(f"tokens: {u['input']} in (+{u.get('cache_read', 0)} cached), {u['output']} out; {res['seconds']} s, {res['builds']} build(s)")
@@ -143,7 +184,12 @@ def _ai(a):
             f.write(res["png"])
     out = a.out or ((res.get("name") or "ai_part").strip().replace(" ", "_") + ".gfem.json")
     ext = out.lower()
-    if ext.endswith(".gfem.json"):
+    if res.get("solve_summary"):
+        print("result:", json.dumps(res["solve_summary"]))
+    if ext.endswith(".gfem.json") and res.get("project"):
+        from . import project as P
+        P.save(res["project"], out)
+    elif ext.endswith(".gfem.json"):
         from . import project as P
         pr = project or P.new_project(res["units"])
         pr["geometry"]["features"] = res["features"]

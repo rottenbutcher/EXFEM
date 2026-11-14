@@ -233,6 +233,7 @@ export class AIDialog {
       prompt, mode, attachments: this.atts.map(a => a.path),
       base_features: mode === "modify" ? this.app.project.geometry.features : null,
       project: mode === "simulate" ? this.app.project : null,
+      session: mode !== "new" && this.session && this.session.provider === prov ? this.session.id : null,
       provider: prov, model: $("#ai-model").value.trim() || null, effort: $("#ai-effort").value,
       base_url: $("#ai-base").value.trim() || null, max_turns: +$("#ai-turns").value || null, visual: $("#ai-visual").checked,
     };
@@ -283,6 +284,11 @@ export class AIDialog {
       this.line(m, cls);
       return;
     }
+    if (e.step === "sim") {
+      if (e.png) this.showPng(e.png);
+      if (e.tool === "solve" && !e.error) $("#ai-status").textContent = "solved – the model is checking the results…";
+      return;
+    }
     if (e.step === "build") {
       if (e.ok) this.showPng(e.png);
       $("#ai-status").textContent = e.ok ? `build ok: ${e.bodies} body(ies), ${(e.size || []).map(v => +v.toPrecision(4)).join(" × ")}` : "build failed – the model is fixing it…";
@@ -295,6 +301,7 @@ export class AIDialog {
       if (e.builds !== undefined) $("#ai-usage").textContent = `${e.builds} build(s) · ${e.seconds}s${tok}`;
       if (!e.ok) { this.line("✖ " + (e.error || "no valid geometry"), "e"); return; }
       this.showPng(e.png);
+      if (e.session) this.session = { id: e.session, provider: this.provider() };
       this.apply(e);
     }
   }

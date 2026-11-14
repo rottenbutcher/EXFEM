@@ -84,10 +84,18 @@ class Server:
                 err = None
             except Exception as e:  # noqa: BLE001
                 res, err = None, f"{type(e).__name__}: {e}"
+            png = res.pop("_png", None) if isinstance(res, dict) else None
+            if png and self.run_dir:
+                with open(os.path.join(self.run_dir, f"result_{self.nsim + 1:04d}.png"), "wb") as f:
+                    f.write(png)
+                res["png_file"] = f"result_{self.nsim + 1:04d}.png"
             self._log_sim(name, args, res, err)
             if err:
                 return [dict(type="text", text="ERROR: " + err)], True
-            return [dict(type="text", text=json.dumps(res, default=float))], False
+            content = [dict(type="text", text=json.dumps({k: v for k, v in res.items() if k != "png_file"}, default=float))]
+            if png and self.visual:
+                content.append(dict(type="image", data=base64.b64encode(png).decode(), mimeType="image/png"))
+            return content, False
         if name == "cad_guide":
             extra = ""
             if self.project:
