@@ -93,6 +93,7 @@ class Session:
         self.result_project = None
         self.ai_job = None
         self.ai_stop = threading.Event()
+        self.ai_login = None
 
     # ---------------------------------------------------------- events
     def emit(self, kind, **data):
@@ -422,6 +423,7 @@ class Session:
             try:
                 ev("start", prompt=prompt)
                 res = AI.generate(prompt, provider=body.get("provider") or None, model=body.get("model") or None,
+                                  run_dir=os.path.join(self.workdir, "ai_runs", str(rid)),
                                   effort=body.get("effort") or None, base_url=body.get("base_url") or None,
                                   attachments=atts, base_features=base, units=units,
                                   max_turns=body.get("max_turns") or None, visual=body.get("visual"),
@@ -438,6 +440,19 @@ class Session:
         self.ai_job = threading.Thread(target=run, daemon=True)
         self.ai_job.start()
         return rid
+
+    def ai_login_start(self, provider, device=False, console=False):
+        from ..cad import ai_cli
+        if self.ai_login is not None and self.ai_login.proc.poll() is None:
+            self.ai_login.cancel()
+
+        def on_line(line, url):
+            self.emit("ai", step="login", provider=provider, line=line, url=url)
+
+        def on_exit(ok):
+            self.emit("ai", step="login_done", provider=provider, ok=bool(ok), status=ai_cli.status(provider))
+        self.ai_login = ai_cli.Login(provider, on_line=on_line, on_exit=on_exit, device=device, console=console)
+        return True
 
     # ---------------------------------------------------------- solve
     def start(self, fn, name):
@@ -610,6 +625,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/ai/settings":
                 from ..cad import ai as AI
                 return self._send(200, AI.public_settings())
+            if u.path == "/api/ai/cli_status":
+                from ..cad import ai_cli
+                names = [q["provider"]] if q.get("provider") in ai_cli.CLIS else list(ai_cli.CLIS)
+                return self._send(200, {n: ai_cli.status(n) for n in names})
             return self._send(404, {"error": "not found"})
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
@@ -712,6 +731,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, AI.public_settings())
             if u.path == "/api/ai/generate":
                 return self._send(200, dict(rid=s.ai_generate(body)))
+            if u.path == "/api/ai/login":
+                from ..cad import ai_cli
+                if body.get("provider") not in ai_cli.CLIS:
+                    raise P.ProjectError("unknown provider")
+                s.ai_login_start(body["provider"], device=bool(body.get("device")), console=bool(body.get("console")))
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/login_code":
+                if s.ai_login is None:
+                    raise P.ProjectError("no sign-in in progress")
+                s.ai_login.send(str(body.get("code", "")))
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/login_cancel":
+                if s.ai_login is not None:
+                    s.ai_login.cancel()
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/logout":
+                from ..cad import ai_cli
+                if body.get("provider") not in ai_cli.CLIS:
+                    raise P.ProjectError("unknown provider")
+                ai_cli.logout(body["provider"])
+                return self._send(200, ai_cli.status(body["provider"]))
             if u.path == "/api/ai/stop":
                 s.ai_stop.set()
                 return self._send(200, dict(ok=True))

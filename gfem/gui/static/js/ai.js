@@ -26,6 +26,14 @@ export class AIDialog {
     $("#ai-undo").onclick = () => this.undo();
     $("#ai-file").onchange = e => this.attach([...e.target.files]);
     $("#ai-provider").onchange = () => { this.fillModels(true); this.saveSettings(); };
+    document.querySelectorAll("#ai-acc-seg button").forEach(b => b.onclick = () => this.pickAccount(b.dataset.p));
+    $("#ai-signin").onclick = () => this.signIn();
+    $("#ai-signout").onclick = () => this.signOut();
+    $("#ai-recheck").onclick = () => this.refreshStatus(true);
+    $("#ai-code-send").onclick = () => this.sendCode();
+    $("#ai-code").addEventListener("keydown", e => { if (e.key === "Enter") this.sendCode(); });
+    $("#ai-login-cancel").onclick = () => { this.api.post("/api/ai/login_cancel"); this.loginPanel(false); };
+    this.cliStatus = {};
     for (const id of ["#ai-model", "#ai-effort", "#ai-base", "#ai-turns", "#ai-visual"]) $(id).onchange = () => this.saveSettings();
     $("#ai-key-save").onclick = () => this.saveKey();
     $("#ai-prompt").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.run(); } });
@@ -59,38 +67,118 @@ export class AIDialog {
   setMode(m) { const r = document.querySelector(`input[name="ai-mode"][value="${m}"]`); if (r && !r.disabled) r.checked = true; }
 
   // ---------------------------------------------------------------- settings
+  isCli(p) { return p === "claude-cli" || p === "codex-cli"; }
+  provider() { return this.account === "api" ? $("#ai-provider").value : this.account; }
+
   fillSettings() {
     const s = this.settings;
     $("#ai-provider").innerHTML = Object.entries(s.providers).map(([k, p]) => `<option value="${k}">${esc(p.label)}</option>`).join("");
-    $("#ai-provider").value = s.provider;
+    $("#ai-provider").value = this.isCli(s.provider) ? "anthropic" : s.provider;
     $("#ai-effort").innerHTML = s.efforts.map(e => `<option>${e}</option>`).join("");
     $("#ai-effort").value = s.effort;
     $("#ai-base").value = s.base_url || "";
     $("#ai-turns").value = s.max_turns;
     $("#ai-visual").checked = !!s.visual;
+    this.account = this.isCli(s.provider) ? s.provider : "api";
     this.fillModels(false);
-    $("#ai-model").value = s.model || s.providers[s.provider].default_model;
+    $("#ai-model").value = s.model || "";
+  }
+
+  pickAccount(acc) {
+    if (this.busy) return;
+    this.account = acc;
+    this.loginPanel(false);
+    this.fillModels(true);
+    this.saveSettings();
   }
 
   fillModels(reset) {
-    const p = this.settings.providers[$("#ai-provider").value];
+    const prov = this.provider(), cli = this.isCli(prov);
+    document.querySelectorAll("#ai-acc-seg button").forEach(b => b.classList.toggle("on", b.dataset.p === this.account));
+    document.querySelectorAll(".ai-apirow, .ai-keyrow").forEach(el => el.style.display = cli ? "none" : "");
+    $(".ai-acc-btns").style.display = cli ? "" : "none";
+    const compat = prov === "compatible";
+    document.querySelectorAll(".ai-burl").forEach(el => el.style.display = compat ? "" : "none");
+    const info = $("#ai-keyinfo");
+    if (cli) {
+      const c = this.settings.cli[prov];
+      $("#ai-models").innerHTML = c.models.filter(Boolean).map(m => `<option value="${esc(m)}">`).join("");
+      if (reset) $("#ai-model").value = "";
+      $("#ai-model").placeholder = "default model of your account";
+      info.className = "ai-keyinfo"; info.textContent = `Uses your ${c.account} plan through the official ${prov === "claude-cli" ? "Claude Code" : "Codex"} sign-in; no API key needed.`;
+      $("#ai-device-lbl").style.display = prov === "codex-cli" ? "" : "none";
+      this.renderStatus(); this.refreshStatus(false);
+      return;
+    }
+    const p = this.settings.providers[prov];
     $("#ai-models").innerHTML = p.models.map(m => `<option value="${esc(m)}">`).join("");
     if (reset) $("#ai-model").value = p.default_model;
     $("#ai-model").placeholder = p.default_model || "model name (e.g. qwen2.5-coder:32b)";
-    const compat = $("#ai-provider").value === "compatible";
-    document.querySelectorAll(".ai-burl").forEach(el => el.style.display = compat ? "" : "none");
-    const info = $("#ai-keyinfo");
-    if (!p.sdk) { info.className = "ai-keyinfo missing"; info.textContent = `Python package missing on the server: pip install ${$("#ai-provider").value === "anthropic" ? "anthropic" : "openai"}`; }
+    const st = $("#ai-acc-status");
+    st.className = "ai-acc-status " + (p.has_key || compat ? "ok" : "bad");
+    st.textContent = compat ? "local server (set the base URL below)" : p.has_key ? `API key ready (${p.key_source === "env" ? p.env : "saved"})` : "no API key yet – open Model & options";
+    if (!p.sdk) { info.className = "ai-keyinfo missing"; info.textContent = `Python package missing on the server: pip install ${prov === "anthropic" ? "anthropic" : "openai"}`; }
     else if (p.has_key) { info.className = "ai-keyinfo"; info.textContent = p.key_source === "env" ? `Using the key from the ${p.env} environment variable.` : "A key is saved on this computer (~/.gfem/ai.json). Enter a new one to replace it, or save empty to remove it."; }
     else if (compat) { info.className = "ai-keyinfo"; info.textContent = "Local servers usually need no key. Set the base URL of the OpenAI-compatible endpoint."; }
     else { info.className = "ai-keyinfo missing"; info.textContent = `No API key yet: paste one above and press Save (stored only on this computer), or set ${p.env} before starting gfem.`; }
     $("#ai-key").placeholder = p.has_key ? "•••••••• (saved)" : "paste API key";
   }
 
+  // ---------------------------------------------------------------- accounts (signed-in CLIs)
+  async refreshStatus(force) {
+    const prov = this.provider();
+    if (!this.isCli(prov)) return;
+    if (!force && this.cliStatus[prov] && Date.now() - this.cliStatus[prov]._t < 60000) return this.renderStatus();
+    $("#ai-acc-status").className = "ai-acc-status"; $("#ai-acc-status").textContent = "checking…";
+    try {
+      const r = await this.api.get("/api/ai/cli_status?provider=" + prov);
+      this.cliStatus[prov] = Object.assign(r[prov], { _t: Date.now() });
+    } catch (e) { this.cliStatus[prov] = { installed: false, detail: e.message, _t: Date.now() }; }
+    if (this.provider() === prov) this.renderStatus();
+  }
+
+  renderStatus() {
+    const prov = this.provider(); if (!this.isCli(prov)) return;
+    const st = this.cliStatus[prov], el = $("#ai-acc-status");
+    const name = prov === "claude-cli" ? "Claude" : "ChatGPT";
+    $("#ai-signout").style.display = st?.logged_in ? "" : "none";
+    $("#ai-signin").style.display = st && st.installed && !st.logged_in ? "" : "none";
+    if (!st) { el.className = "ai-acc-status"; el.textContent = "checking…"; return; }
+    if (!st.installed) { el.className = "ai-acc-status bad"; el.innerHTML = `${prov === "claude-cli" ? "Claude Code" : "Codex"} CLI not installed – run <code>${esc(st.install)}</code> and press ⟳`; return; }
+    el.className = "ai-acc-status " + (st.logged_in ? "ok" : "bad");
+    el.textContent = st.logged_in ? `✔ signed in to ${name}` + (st.detail && st.detail.includes("@") ? ` (${st.detail})` : "") : `not signed in to ${name}`;
+  }
+
+  loginPanel(on) { $("#ai-login").classList.toggle("on", !!on); if (!on) { $("#ai-login-msg").textContent = ""; $("#ai-login-link").removeAttribute("href"); } }
+
+  async signIn() {
+    const prov = this.provider();
+    const remote = !["localhost", "127.0.0.1", "::1", "[::1]"].includes(location.hostname);
+    this.loginPanel(true);
+    $("#ai-login-msg").textContent = remote ? "Starting sign-in… (gfem runs on another computer: use the link below)" : "Starting sign-in… a browser window opens; sign in there.";
+    $("#ai-code-row").style.display = "";
+    this._popup = remote ? window.open("", "gfem-signin") : null;     // opened in the click: not blocked
+    try { await this.api.post("/api/ai/login", { provider: prov, device: prov === "codex-cli" && ($("#ai-device").checked || remote) }); }
+    catch (e) { $("#ai-login-msg").textContent = "Sign-in failed to start: " + e.message; if (this._popup) this._popup.close(); }
+  }
+
+  async sendCode() {
+    const code = $("#ai-code").value.trim(); if (!code) return;
+    try { await this.api.post("/api/ai/login_code", { code }); $("#ai-code").value = ""; $("#ai-login-msg").textContent += "\ncode sent…"; }
+    catch (e) { $("#ai-login-msg").textContent += "\n" + e.message; }
+  }
+
+  async signOut() {
+    const prov = this.provider();
+    if (!confirm(`Sign out of ${prov === "claude-cli" ? "Claude (Claude Code)" : "ChatGPT (Codex)"} on this computer?`)) return;
+    try { const r = await this.api.post("/api/ai/logout", { provider: prov }); this.cliStatus[prov] = Object.assign(r, { _t: Date.now() }); this.renderStatus(); }
+    catch (e) { this.line("Sign out failed: " + e.message, "e"); }
+  }
+
   async saveSettings() {
     try {
       this.settings = await this.api.post("/api/ai/settings", {
-        provider: $("#ai-provider").value, model: $("#ai-model").value.trim(), effort: $("#ai-effort").value,
+        provider: this.provider(), model: $("#ai-model").value.trim(), effort: $("#ai-effort").value,
         base_url: $("#ai-base").value.trim(), max_turns: Math.max(1, Math.min(30, +$("#ai-turns").value || 10)), visual: $("#ai-visual").checked });
       this.fillModels(false);
     } catch (e) { this.line("Settings: " + e.message, "e"); }
@@ -100,6 +188,7 @@ export class AIDialog {
     const key = $("#ai-key").value.trim();
     try {
       this.settings = await this.api.post("/api/ai/settings", { provider: $("#ai-provider").value, key });
+      this.account = "api";
       $("#ai-key").value = ""; this.fillModels(false);
       this.line(key ? "API key saved on this computer." : "API key removed.", "s");
     } catch (e) { this.line("Saving key failed: " + e.message, "e"); }
@@ -126,16 +215,24 @@ export class AIDialog {
     if (!prompt) { $("#ai-prompt").focus(); return; }
     if (!this.settings) await this.loadSettings();             // never send defaults of an unfilled form
     if (!this.settings) return;
-    const p = this.settings?.providers?.[$("#ai-provider").value];
-    if (p && !p.has_key && $("#ai-provider").value !== "compatible") {
-      $("#ai-settings").open = true; $("#ai-key").focus();
-      this.line("Enter an API key first (Model & API key).", "e"); return;
+    const prov = this.provider();
+    if (this.isCli(prov)) {
+      if (!this.cliStatus[prov]) await this.refreshStatus(true);
+      const st = this.cliStatus[prov];
+      if (!st?.installed) { this.line(`Install the ${prov === "claude-cli" ? "Claude Code" : "Codex"} CLI first: ${st?.install || ""}`, "e"); return; }
+      if (!st.logged_in) { this.line("Sign in first (button at the top).", "e"); $("#ai-signin").focus(); return; }
+    } else {
+      const p = this.settings?.providers?.[prov];
+      if (p && !p.has_key && prov !== "compatible") {
+        $("#ai-settings").open = true; $("#ai-key").focus();
+        this.line("Enter an API key first (Model & options).", "e"); return;
+      }
     }
     const mode = this.mode();
     const body = {
       prompt, mode, attachments: this.atts.map(a => a.path),
       base_features: mode === "modify" ? this.app.project.geometry.features : null,
-      provider: $("#ai-provider").value, model: $("#ai-model").value.trim() || null, effort: $("#ai-effort").value,
+      provider: prov, model: $("#ai-model").value.trim() || null, effort: $("#ai-effort").value,
       base_url: $("#ai-base").value.trim() || null, max_turns: +$("#ai-turns").value || null, visual: $("#ai-visual").checked,
     };
     this.setBusy(true, "Starting…");
@@ -151,7 +248,9 @@ export class AIDialog {
   }
 
   line(msg, cls = "a") {
-    const d = document.createElement("div"); d.className = cls; d.textContent = msg;
+    const d = document.createElement("div"); d.className = cls;
+    if (cls === "a") d.innerHTML = esc(msg).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/^(\s*)[-*] /gm, "$1• ");
+    else d.textContent = msg;
     const L = $("#ai-log"); L.appendChild(d); L.scrollTop = L.scrollHeight;
   }
 
@@ -161,6 +260,18 @@ export class AIDialog {
   }
 
   onEvent(e) {
+    if (e.step === "login") {
+      this.loginPanel(true);
+      const m = $("#ai-login-msg"); m.textContent += (m.textContent ? "\n" : "") + e.line; m.scrollTop = m.scrollHeight;
+      if (e.url) { $("#ai-login-link").href = e.url; if (this._popup && !this._popup.closed) { this._popup.location = e.url; this._popup = null; } }
+      return;
+    }
+    if (e.step === "login_done") {
+      this.cliStatus[e.provider] = Object.assign(e.status || {}, { _t: Date.now() });
+      if (e.ok) { this.loginPanel(false); this.line(`Signed in to ${e.provider === "claude-cli" ? "Claude" : "ChatGPT"}.`, "b"); }
+      else $("#ai-login-msg").textContent += "\nSign-in did not complete.";
+      this.renderStatus(); return;
+    }
     if (this.rid !== null && e.rid !== this.rid && e.step !== "start") return;
     if (e.step === "start") { this.rid = e.rid; return; }
     if (e.step === "log") {
@@ -178,7 +289,8 @@ export class AIDialog {
     }
     if (e.step === "done") {
       this.setBusy(false, "");
-      const tok = e.usage && (e.usage.input || e.usage.output) ? ` · tokens ${e.usage.input + (e.usage.cache_read || 0)} in / ${e.usage.output} out` : "";
+      const tok = (e.usage && (e.usage.input || e.usage.output) ? ` · tokens ${e.usage.input + (e.usage.cache_read || 0)} in / ${e.usage.output} out` : "")
+        + (e.usage?.cost_usd ? ` · ≈ $${e.usage.cost_usd} (API-equivalent)` : "");
       if (e.builds !== undefined) $("#ai-usage").textContent = `${e.builds} build(s) · ${e.seconds}s${tok}`;
       if (!e.ok) { this.line("✖ " + (e.error || "no valid geometry"), "e"); return; }
       this.showPng(e.png);

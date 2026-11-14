@@ -465,6 +465,9 @@ class CadModel:
             return [(1, occ.addLine(a, b)) for a, b in zip(pts[:-1], pts[1:])]
         if t == "boolean":
             op = f.get("op", "fuse")
+            tgt = f["target"] if isinstance(f["target"], list) else [f["target"]]
+            if not f.get("tool") and op == "fuse" and len(tgt) > 1:      # fuse a list of bodies
+                f = dict(f, target=tgt[:1], tool=tgt[1:])
             obj = self._ids_to_tags(bodies, f["target"])
             tool = self._ids_to_tags(bodies, f["tool"]) if not f.get("keep_tool") else \
                 [x for i in f["tool"] for x in bodies[i]]
@@ -476,7 +479,8 @@ class CadModel:
             occ.synchronize()
             edges = self._edges_for(g, vols, f.get("edges", "all"))
             if not edges:
-                raise GeometryError("no edges selected")
+                raise GeometryError("no edges selected. Edges of the target (type, midpoint com, length): "
+                                    + self._edge_listing(g, vols))
             if t == "fillet":
                 out = occ.fillet([v[1] for v in vols], edges, [num("r", 1.0)], removeVolume=True)
             else:
@@ -568,6 +572,20 @@ class CadModel:
             if best is not None and best not in out:
                 out.append(best)
         return out
+
+    @staticmethod
+    def _edge_listing(g, vols, limit=40):
+        edges = set()
+        for v in vols:
+            for _, sf in g.model.getBoundary([v], oriented=False, recursive=False):
+                for _, e in g.model.getBoundary([(2, sf)], oriented=False, recursive=False):
+                    edges.add(abs(e))
+        out = []
+        for e in sorted(edges)[:limit]:
+            c = g.model.occ.getCenterOfMass(1, e)
+            out.append(f"{g.model.getType(1, e)} com=[{c[0]:.4g},{c[1]:.4g},{c[2]:.4g}] size={g.model.occ.getMass(1, e):.4g}")
+        more = f" ... and {len(edges) - limit} more" if len(edges) > limit else ""
+        return "; ".join(out) + more + (". Note: the com of a full circle edge is its centre" if out else "")
 
     @staticmethod
     def _edge_filter(g, edges, spec):

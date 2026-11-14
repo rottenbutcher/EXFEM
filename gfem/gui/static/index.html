@@ -125,6 +125,23 @@
       <button class="dlg-x" id="ai-close" title="Close">✕</button></div>
     <div class="ai-body">
       <div class="ai-left">
+        <div class="ai-account" id="ai-account">
+          <div class="ai-acc-row">
+            <div class="seg" id="ai-acc-seg">
+              <button data-p="claude-cli" title="Use your Claude account (Claude Code sign-in)">Claude account</button>
+              <button data-p="codex-cli" title="Use your ChatGPT account (OpenAI Codex sign-in)">ChatGPT account</button>
+              <button data-p="api" title="Use an API key or a local OpenAI-compatible server">API key</button>
+            </div>
+            <span id="ai-acc-status" class="ai-acc-status">…</span>
+            <span class="ai-acc-btns"><button id="ai-signin" class="primary">Sign in</button><button id="ai-signout">Sign out</button><button id="ai-recheck" title="Check the sign-in status again">⟳</button></span>
+            <label class="chk ai-dev" id="ai-device-lbl" title="Sign in with a one-time code on any device (use this when gfem runs on another computer)"><input type="checkbox" id="ai-device"> device code</label>
+          </div>
+          <div class="ai-login" id="ai-login">
+            <div id="ai-login-msg"></div>
+            <div class="ai-login-row"><a id="ai-login-link" target="_blank" rel="noopener">Open the sign-in page ↗</a></div>
+            <div class="ai-login-row" id="ai-code-row"><input id="ai-code" placeholder="If the page shows a code, paste it here" spellcheck="false" autocomplete="off"><button id="ai-code-send">Submit code</button><button id="ai-login-cancel">Cancel</button></div>
+          </div>
+        </div>
         <div class="ai-mode">
           <label class="chk"><input type="radio" name="ai-mode" value="new" checked> New part</label>
           <label class="chk"><input type="radio" name="ai-mode" value="modify"> Modify current geometry</label>
@@ -141,14 +158,14 @@
           <span id="ai-status"></span>
         </div>
         <details class="ai-settings" id="ai-settings">
-          <summary>Model &amp; API key</summary>
+          <summary>Model &amp; options</summary>
           <div class="grid">
-            <label>Provider</label><select id="ai-provider"></select>
+            <label class="ai-apirow">Provider</label><select class="ai-apirow" id="ai-provider"></select>
             <label>Model</label><input id="ai-model" list="ai-models" spellcheck="false"><datalist id="ai-models"></datalist>
             <label>Effort</label><select id="ai-effort"></select>
-            <label>API key</label><div class="row"><input id="ai-key" type="password" autocomplete="off" placeholder=""><button id="ai-key-save">Save</button></div>
+            <label class="ai-keyrow">API key</label><div class="row ai-keyrow"><input id="ai-key" type="password" autocomplete="off" placeholder=""><button id="ai-key-save">Save</button></div>
             <label class="ai-burl">Base URL</label><input class="ai-burl" id="ai-base" placeholder="http://localhost:11434/v1" spellcheck="false">
-            <label>Max turns</label><input id="ai-turns" type="number" min="1" max="30">
+            <label class="ai-apirow">Max turns</label><input class="ai-apirow" id="ai-turns" type="number" min="1" max="30">
             <label>Self-check</label><label class="chk"><input id="ai-visual" type="checkbox"> send rendered views back to the model</label>
           </div>
           <div class="ai-keyinfo" id="ai-keyinfo"></div>

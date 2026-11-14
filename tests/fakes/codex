@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Fake `codex` for tests: login status, --version, and `exec --json` that drives the gfem MCP server."""
+import json, os, subprocess, sys, tomllib
+a = sys.argv[1:]
+if a[:1] == ["--version"]: print("codex-cli 0.0-fake"); sys.exit(0)
+if a[:2] == ["login", "status"]: print("Logged in using ChatGPT"); sys.exit(0)
+if a[:1] != ["exec"]: sys.exit(2)
+cfg = {}
+for i, x in enumerate(a):
+    if x == "-c":
+        k, v = a[i + 1].split("=", 1)
+        cfg[k] = tomllib.loads("v=" + v)["v"]
+imgs = [a[i + 1] for i, x in enumerate(a) if x == "-i"]
+prompt = a[a.index("--") + 1]
+env = dict(os.environ, **cfg["mcp_servers.gfem.env"])
+p = subprocess.Popen([cfg["mcp_servers.gfem.command"]] + cfg["mcp_servers.gfem.args"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+def rpc(i, m, params=None):
+    p.stdin.write(json.dumps(dict(jsonrpc="2.0", id=i, method=m, params=params or {})) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+out = lambda e: print(json.dumps(e), flush=True)
+out({"type": "thread.started", "thread_id": "t1"})
+rpc(1, "initialize", {"protocolVersion": "2025-06-18"})
+tools = [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]]
+out({"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": f"tools: {tools}; images: {len(imgs)}; approval={cfg.get('approval_policy')}"}})
+feats = [dict(id="F1", type="box", dx=100, dy=60, dz=10), dict(id="F2", type="cylinder", x=50, y=30, z=-1, dz=12, r=5),
+         dict(id="F3", type="boolean", op="cut", target=["F1"], tool=["F2"])]
+r = rpc(3, "tools/call", {"name": "build_cad", "arguments": {"name": "Plate", "features": feats}})
+out({"type": "item.completed", "item": {"id": "i1", "type": "mcp_tool_call", "server": "gfem", "tool": "build_cad", "status": "completed"}})
+out({"type": "item.completed", "item": {"id": "i2", "type": "agent_message", "text": "Plate 100 x 60 x 10 with a d10 hole." + (" modify" if "Modify the existing" in prompt else "")}})
+out({"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 300}})
+p.stdin.close(); p.wait()

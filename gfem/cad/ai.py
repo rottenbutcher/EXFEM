@@ -47,7 +47,7 @@ PROVIDERS = {
                        models=[]),
 }
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
-DEFAULTS = dict(provider="anthropic", model="", effort="high", base_url="", max_turns=10, visual=True)
+DEFAULTS = dict(provider="claude-cli", model="", effort="high", base_url="", max_turns=10, visual=True)
 
 
 def settings_path():
@@ -109,6 +109,8 @@ def public_settings():
         out["providers"][p] = dict(label=d["label"], default_model=d["model"], models=d["models"],
                                    has_key=src is not None, key_source=src, env=env, sdk=_sdk_ok(p))
     out["efforts"] = EFFORTS
+    from .ai_cli import CLIS
+    out["cli"] = {k: dict(label=v["label"], models=v["models"], account=v["account"]) for k, v in CLIS.items()}
     return out
 
 
@@ -193,7 +195,8 @@ Operations:
 - pattern:  target id or [ids], kind "linear" (direction, spacing) | "circular" (point, axis,
             angle deg total, default 360), count (including the original), fuse (bool: fuse the
             copies with the original into one body)
-Any feature may have "name" (a readable label shown in the tree).
+Give every feature a short "name" ("Base plate", "Bolt hole", "Bolt pattern", ...): it is the label
+the user sees in the feature tree. Give the part a "name" in every build_cad call.
 
 # Example: 100 x 60 x 10 plate, 4 corner holes d8, a central boss d30 x 20 with a d16 bore
 {"units":"mm","name":"Mounting plate","features":[
@@ -221,7 +224,7 @@ TOOL_SCHEMA = {
         "features": {"type": "array", "description": "Ordered feature tree (see system prompt)",
                      "items": {"type": "object"}},
     },
-    "required": ["features"],
+    "required": ["name", "features"],
 }
 
 # ================================================================== static validation
@@ -481,8 +484,11 @@ def validate_features(features, max_features=400):
         elif t == "boolean":
             if f.get("op", "fuse") not in ("fuse", "cut", "intersect"):
                 vr.err(where, "op must be fuse, cut or intersect")
-            if not _ids(f.get("tool")):
-                vr.err(where, "tool must list at least one id")
+            if not _ids(f.get("tool")) and f.get("op", "fuse") == "fuse" and len(_ids(f.get("target"))) > 1:
+                tg = _ids(f.get("target"))
+                f["target"], f["tool"] = tg[:1], tg[1:]              # "fuse these bodies"
+            elif not _ids(f.get("tool")):
+                vr.err(where, "tool must list at least one id (to fuse several bodies, list them all in target)")
             if set(_ids(f.get("target"))) & set(_ids(f.get("tool"))):
                 vr.err(where, "an id cannot be both target and tool")
         if t in ("fillet", "chamfer"):
@@ -1057,7 +1063,7 @@ def make_backend(provider, user_content_text, attachments=(), model=None, api_ke
                  base_url=None, client=None, system=SYSTEM_PROMPT):
     provider = provider or "anthropic"
     if provider not in PROVIDERS:
-        raise AIError(f"unknown provider {provider!r}; use one of {sorted(PROVIDERS)}")
+        raise AIError(f"unknown provider {provider!r}; use one of claude-cli, codex-cli, {', '.join(sorted(PROVIDERS))}")
     model = model or PROVIDERS[provider]["model"]
     if not model:
         raise AIError("a model name is required for an OpenAI-compatible server")
@@ -1145,10 +1151,20 @@ def run_agent(backend, units="mm", max_turns=10, visual=True, log=None, on_text=
 
 def generate(prompt, provider=None, model=None, api_key=None, base_url=None, effort=None, attachments=(),
              base_features=None, units="mm", max_turns=None, visual=None, log=None, on_text=None,
-             on_build=None, should_stop=None, client=None, backend=None):
-    """One-call text-to-CAD. Missing options come from the saved settings."""
+             on_build=None, should_stop=None, client=None, backend=None, run_dir=None):
+    """One-call text-to-CAD. Missing options come from the saved settings.
+    provider: 'claude-cli' / 'codex-cli' (signed-in account, no key), 'anthropic' / 'openai' /
+    'compatible' (API key or local server)."""
     s = load_settings()
     provider = provider or s["provider"]
+    if provider in ("claude-cli", "codex-cli"):          # signed-in CLI, no API key
+        from .ai_cli import run_cli
+        if model is None and provider == s.get("provider"):
+            model = s.get("model") or None
+        return run_cli(provider, prompt, attachments=attachments, base_features=base_features, units=units,
+                       model=model, effort=effort or s.get("effort") or None,
+                       visual=s.get("visual", True) if visual is None else visual, log=log, on_build=on_build,
+                       should_stop=should_stop, run_dir=run_dir)
     if model is None and provider == s.get("provider"):
         model = s.get("model") or None             # the saved model belongs to the saved provider
     effort = effort or s.get("effort") or "high"
