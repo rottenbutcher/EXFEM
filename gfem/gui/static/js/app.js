@@ -370,7 +370,8 @@ class App {
         G("Sketch", B("sketch", "Sketch…", "✎", "2D sketch → extrude / revolve / surface") + B("import-dxf", "DXF", "⌗", "Extrude a DXF drawing")) +
         G("Thin structures", B("f-surface", "Surface", "▱", "Planar surface body (shell, from a sketch)") + B("f-line", "Line", "╱", "Line body (beam) from points")) +
         G("Operations", B("f-union", "Union", "∪", "Fuse selected bodies") + B("f-subtract", "Subtract", "∖", "First selected body minus the others") + B("f-intersect", "Intersect", "∩") +
-          B("f-fillet", "Fillet", "◜", "Fillet selected edges (edge filter)") + B("f-chamfer", "Chamfer", "◸") ) +
+          B("f-fillet", "Fillet", "◜", "Fillet selected edges (edge filter)") + B("f-chamfer", "Chamfer", "◸") +
+          B("f-shell", "Shell", "▢", "Hollow the body: select the faces to open (face filter)") + B("f-hole", "Hole", "◎", "Drill a hole into the selected face (at its centre)")) +
         G("Transform", B("f-move", "Move", "✥") + B("f-rotate", "Rotate", "⟳") + B("f-mirror", "Mirror", "⇋") + B("f-pattern", "Pattern", "⁘")) +
         G("Import / Export", B("import-cad", "Import CAD", "⬢") + B("exp-step", "STEP", "⇩")) +
         G("Options", `<label class="chk"><input type="checkbox" id="rb-share" ${this.project?.geometry.share_topology ? "checked" : ""}> Share topology</label>`),
@@ -503,7 +504,7 @@ class App {
     for (const f of this.project.geometry.features) {
       if (f.suppressed) continue;
       if (f.type === "boolean") { [].concat(f.target, f.keep_tool ? [] : f.tool).forEach(x => consumed.add(x)); }
-      if (["fillet", "chamfer"].includes(f.type)) [].concat(f.target).forEach(x => consumed.add(x));
+      if (["fillet", "chamfer", "shell", "hole"].includes(f.type)) [].concat(f.target).forEach(x => consumed.add(x));
       if (f.type === "transform" && !f.copy) [].concat(f.target).forEach(x => consumed.add(x));
       if (f.type === "pattern" && f.fuse) [].concat(f.target).forEach(x => consumed.add(x));
     }
@@ -553,6 +554,24 @@ class App {
       const bid = this.bodyOfEdge(edges[0].id);
       const tgt = this.featureOfBodies([bid])[0] || this.liveFeatures().slice(-1)[0]?.id;
       f = { type: kind, target: [tgt], edges: edges.map(e => e.sig), r: s(diag / 60), d: s(diag / 60) };
+    }
+    if (kind === "shell" || kind === "hole") {
+      const sel = this.viewer.selection;
+      if (sel.dim !== 2 || !sel.ids.size) {
+        this.setFilter("face");
+        return this.log(kind === "shell" ? "select the face(s) to remove (open faces) first, then press Shell again"
+          : "select the face to drill into first (face filter), then press Hole again", "warn");
+      }
+      const finfo = this.geom.info.faces;
+      const faces = [...sel.ids].map(i => finfo.find(x => x.id === i)).filter(Boolean);
+      const bid = faces[0].bodies?.[0];
+      const tgt = (bid != null ? this.featureOfBodies([bid])[0] : null) || this.liveFeatures().slice(-1)[0]?.id;
+      if (!tgt) return this.log("no body", "warn");
+      if (kind === "shell") f = { type: "shell", target: [tgt], thickness: s(diag / 40), open_faces: faces.map(x => ({ com: x.com })) };
+      else {
+        const n = faces[0].normal || [0, 0, 1];
+        f = { type: "hole", target: [tgt], position: faces[0].com.map(v => s(v)), direction: n.map(v => -v), d: s(diag / 15), depth: "through" };
+      }
     }
     if (["move", "rotate", "mirror", "pattern"].includes(kind)) {
       const sel = this.viewer.selection;
@@ -828,7 +847,8 @@ class App {
       const fields = { box: [["x", "X"], ["y", "Y"], ["z", "Z"], ["dx", "Length X"], ["dy", "Length Y"], ["dz", "Length Z"]], cylinder: [["x", "Base X"], ["y", "Base Y"], ["z", "Base Z"], ["dx", "Axis X"], ["dy", "Axis Y"], ["dz", "Axis Z"], ["r", "Radius"], ["angle", "Angle (°)"]],
         sphere: [["x", "Center X"], ["y", "Center Y"], ["z", "Center Z"], ["r", "Radius"]], cone: [["x", "Base X"], ["y", "Base Y"], ["z", "Base Z"], ["dx", "Axis X"], ["dy", "Axis Y"], ["dz", "Axis Z"], ["r1", "Base radius"], ["r2", "Top radius"]],
         torus: [["x", "Center X"], ["y", "Center Y"], ["z", "Center Z"], ["r1", "Major radius"], ["r2", "Minor radius"]], surface: [["offset", "Plane offset"]], extrude: [["offset", "Plane offset"], ["distance", "Depth"]], revolve: [["offset", "Plane offset"], ["angle", "Angle (°)"]],
-        dxf_extrude: [["distance", "Depth"], ["scale", "Scale"]], fillet: [["r", "Radius"]], chamfer: [["d", "Distance"]], import: [["scale", "Scale"]] }[it.type] || [];
+        dxf_extrude: [["distance", "Depth"], ["scale", "Scale"]], fillet: [["r", "Radius"]], chamfer: [["d", "Distance"]], import: [["scale", "Scale"]],
+        shell: [["thickness", "Wall thickness"]], hole: [["d", "Diameter"]], sweep: [["offset", "Plane offset"]] }[it.type] || [];
       for (const [k, l] of fields) num(l, it, k, ["angle", "scale"].includes(k) ? "" : L);
       if (it.type === "extrude" || it.type === "revolve") { ro("Profiles", it.loops.length); rows.push({ label: "Sketch", html: `<button data-sketch="1">Edit sketch…</button>` }); if (it.type === "extrude") chk("Symmetric", it, "symmetric"); }
       if (it.type === "boolean") { sel("Operation", it, "op", [["fuse", "Union"], ["cut", "Subtract"], ["intersect", "Intersect"]]); ro("Target", esc(it.target.join(", "))); ro("Tools", esc(it.tool.join(", "))); chk("Keep tool bodies", it, "keep_tool"); }
@@ -841,6 +861,13 @@ class App {
       if (it.type === "line") rows.push({ label: "Points (x y z per line)", html: `<textarea data-points="1" rows="4">${it.points.map(p => p.join(" ")).join("\n")}</textarea>` });
       if (it.type === "surface") { ro("Profiles", it.loops.length); rows.push({ label: "Sketch", html: `<button data-sketch="1">Edit sketch…</button>` }); }
       if (it.type === "import") { ro("File", esc(it.file.split(/[\\/]/).pop())); chk("Heal geometry", it, "heal"); }
+      if (it.type === "shell") { ro("Open faces", (it.open_faces || []).length); chk("Grow outward", it, "outward"); }
+      if (it.type === "hole") { vec("Position", it, "position", L); vec("Direction", it, "direction");
+        rows.push({ label: "Depth", unit: L, html: `<input type="text" data-k="depth" value="${esc(it.depth ?? "through")}" placeholder="through">`, obj: it, key: "depth", t: "depth" });
+        rows.push({ label: "Counterbore Ø, depth", unit: L, html: `<input type="text" data-k="cbore" value="${esc((it.cbore || []).join(", "))}" placeholder="none">`, obj: it, key: "cbore", t: "pair" });
+        rows.push({ label: "Countersink Ø, angle", html: `<input type="text" data-k="csk" value="${esc((it.csk || []).join(", "))}" placeholder="none">`, obj: it, key: "csk", t: "pair" }); }
+      if (it.type === "loft") { ro("Sections", (it.sections || []).length); chk("Ruled", it, "ruled"); }
+      if (it.type === "sweep") { ro("Profiles", (it.loops || []).length); ro("Path", it.helix ? `helix r=${it.helix.radius} pitch=${it.helix.pitch} turns=${it.helix.turns}` : `${(it.path || []).length} points`); chk("Smooth path (spline)", it, "smooth"); }
     } else if (kind === "body") {
       const pb = p.bodies[id] || (p.bodies[id] = {}); const bi = info?.bodies.find(b => String(b.id) === id);
       title = `Details of "${pb.name || "Body " + id}"`; sec("Definition"); txt("Name", pb, "name"); chk("Suppressed", pb, "suppressed");
@@ -972,6 +999,8 @@ class App {
         else if (r.t === "chk") o[k] = el.checked;
         else if (r.t === "vec") { const v = [...(o[k] || [0, 0, 0])]; v[+el.dataset.i] = el.value === "" ? null : +el.value; o[k] = v; }
         else if (r.t === "sel") o[k] = ["order"].includes(k) ? +el.value : el.value;
+        else if (r.t === "depth") o[k] = el.value.trim() === "" || el.value.trim().toLowerCase() === "through" ? "through" : +el.value;
+        else if (r.t === "pair") { const v = el.value.split(/[ ,;]+/).filter(Boolean).map(Number); if (v.length === 2 && v.every(isFinite)) o[k] = v; else delete o[k]; }
         else o[k] = el.value;
         await this.afterEdit(kind, it, k);
       };
