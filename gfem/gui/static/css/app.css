@@ -238,3 +238,9 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 #ai-login-link { font-weight: 600; color: var(--accent); }
 #ai-login-link:not([href]) { display: none; }
 .ai-dev { font-size: 11.5px; color: var(--muted); }
+.ai-strip { display: flex; gap: 4px; overflow-x: auto; min-height: 0; flex: 0 0 auto; }
+.ai-strip img { height: 46px; border: 2px solid var(--line); border-radius: 3px; cursor: pointer; background: #fafafa; }
+.ai-strip img.sel { border-color: var(--accent); }
+.ai-strip img.res { border-style: dashed; }
+#ai-apply-build { position: absolute; right: 8px; bottom: 6px; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; display: none; background: rgba(255,255,255,.9); padding: 1px 6px; border-radius: 3px; }
+#ai-apply-build.on { display: block; }

@@ -173,12 +173,15 @@
         </details>
       </div>
       <div class="ai-right">
-        <div class="ai-preview"><img id="ai-img" alt=""><div id="ai-img-msg">The model's builds appear here.</div></div>
+        <div class="ai-preview"><img id="ai-img" alt=""><div id="ai-img-msg">The model's builds appear here.</div>
+          <a id="ai-apply-build" title="Use this intermediate build as the model">apply this build</a></div>
+        <div class="ai-strip" id="ai-strip"></div>
         <div class="ai-log" id="ai-log"></div>
       </div>
     </div>
     <div class="dlg-btns">
       <span id="ai-usage"></span>
+      <button id="ai-report" title="Download a Markdown report of the AI requests and results">Report</button>
       <button id="ai-newchat" title="Forget the conversation: the next request starts fresh">New conversation</button>
       <button id="ai-undo" disabled title="Restore the geometry from before the last AI change">Undo AI change</button>
       <button id="ai-ok" class="primary">Close</button>
