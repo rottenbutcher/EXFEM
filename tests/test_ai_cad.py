@@ -318,3 +318,24 @@ def test_gui_ai_endpoints(tmp_path, monkeypatch):
         assert st == 400 and "uploaded" in r["error"]
     finally:
         srv.shutdown()
+
+
+def test_new_cad_features_exact_volumes():
+    from gfem.cad import CadModel
+    vol = lambda f: sum(b["volume"] for b in CadModel(f).regenerate()["bodies"])
+    box = dict(id="B", type="box", dx=50, dy=50, dz=10)
+    assert vol([dict(id="B", type="box", dx=100, dy=60, dz=40),
+                dict(id="S", type="shell", target=["B"], thickness=2, open_faces=[{"normal": [0, 0, 1]}])]) == pytest.approx(100 * 60 * 40 - 96 * 56 * 38, rel=1e-9)
+    assert vol([box, dict(id="H", type="hole", target=["B"], position=[25, 25, 10], d=8, cbore=[14, 4])]) == pytest.approx(
+        25000 - np.pi * 16 * 10 - np.pi * (49 - 16) * 4, rel=1e-9)
+    assert vol([box, dict(id="H", type="hole", target=["B"], position=[25, 25, 10], d=8, depth=5)]) == pytest.approx(25000 - np.pi * 16 * 5, rel=1e-9)
+    assert vol([box, dict(id="H", type="hole", target=["B"], position=[25, 25, 10], d=6, csk=[12, 90])]) == pytest.approx(
+        25000 - np.pi * 9 * 10 - np.pi * (36 + 18 + 9) + np.pi * 9 * 3, rel=1e-9)
+    assert vol([dict(id="P", type="sweep", plane={"origin": [0, 0, 0], "normal": [1, 0, 0]},
+                     loops=[dict(circle=[0, 0, 5]), dict(circle=[0, 0, 4])], path=[[0, 0, 0], [100, 0, 0]])]) == pytest.approx(np.pi * 9 * 100, rel=1e-6)
+    spring = vol([dict(id="H", type="sweep", plane={"origin": [20, 0, 0], "normal": [0, 1, 0]}, loops=[dict(circle=[0, 0, 2])],
+                       helix=dict(radius=20, pitch=10, turns=3))])
+    assert spring == pytest.approx(np.pi * 4 * 2 * np.pi * np.hypot(20, 10 / (2 * np.pi)) * 3, rel=0.01)
+    frustum = vol([dict(id="L", type="loft", ruled=True, sections=[dict(plane="XY", loop=dict(rect=[-20, -20, 20, 20])),
+                                                                   dict(plane="XY", offset=30, loop=dict(rect=[-10, -10, 10, 10]))])])
+    assert frustum == pytest.approx(30 / 3 * (1600 + 400 + np.sqrt(1600 * 400)), rel=1e-6)

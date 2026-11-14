@@ -150,8 +150,9 @@ drawing) of a mechanical part into a parametric feature tree and build it with t
 - Apply fillets and chamfers late but before cutting many small holes when possible; keep fillet
   radii smaller than half of the adjacent wall thickness. A fillet that fails aborts the build:
   prefer selected edges over "all".
-- Holes: a cylinder longer than the material (start 1 mm below, end 1 mm above) cut from the body.
-  Many holes: cylinder + pattern (copies, not fused) and one cut with all ids as tool.
+- Holes: the `hole` feature (simple, counterbored, countersunk, blind), or a cylinder longer than
+  the material cut from the body. Many holes: cylinder + pattern (copies, not fused) and one cut
+  with all ids as tool.
 
 # Feature types (fields not listed are ignored; numbers are plain JSON numbers)
 Primitives (create a new body):
@@ -190,6 +191,15 @@ Operations:
   edges: "all", or a filter {"parallel":"x"|"y"|"z", "box":[xmin,ymin,zmin,xmax,ymax,zmax],
          "type":"Line"|"Circle", "min_length":L, "max_length":L}  (all criteria must hold),
          or a list of edges [{"com":[x,y,z], "size":length}, ...] (edge midpoint, length) or filters.
+- hole:     target [id], position [x,y,z] (centre on the entry face), direction [x,y,z] (drilling
+            direction, default [0,0,-1]), d, depth (number or "through", default through),
+            cbore [diameter, depth] (counterbore), csk [diameter, angle deg] (countersink)
+- shell:    target [id], thickness, open_faces (faces removed, e.g. [{"normal":[0,0,1]}] for an open
+            top; filters "normal" / "box" / "type" or {"com":[x,y,z]}), outward (bool) -> hollow part
+- loft:     sections [{plane, offset, loop}, ...] (>= 2, one closed loop each), ruled (bool)
+- sweep:    plane, offset, loops (profile, holes allowed) swept along "path" [[x,y,z], ...] (polyline,
+            "smooth": true for a spline) or "helix" {radius, pitch, turns, axis_point} (axis +z).
+            Put the profile plane at the path start, normal along the path tangent.
 - transform: target id or [ids], op "translate" (vector) | "rotate" (point, axis, angle deg) |
              "mirror" (point, normal) | "scale" (point, factor), copy (bool: keep the original)
 - pattern:  target id or [ids], kind "linear" (direction, spacing) | "circular" (point, axis,
@@ -242,9 +252,12 @@ _NUM_FIELDS = {
     "chamfer": dict(d=1),
     "pattern": dict(count=2, spacing=1, angle=360),
     "transform": dict(angle=90, factor=1),
+    "shell": dict(thickness=1),
+    "hole": dict(d=1),
+    "sweep": dict(offset=0),
 }
-TYPES = set(_NUM_FIELDS) | {"line", "boolean", "dxf_extrude", "import"}
-_CONSUMES = {"boolean", "fillet", "chamfer"}
+TYPES = set(_NUM_FIELDS) | {"line", "boolean", "dxf_extrude", "import", "loft"}
+_CONSUMES = {"boolean", "fillet", "chamfer", "shell", "hole"}
 
 
 class ValidationResult:
@@ -462,6 +475,49 @@ def validate_features(features, max_features=400):
             pts = f.get("points")
             if not isinstance(pts, list) or len(pts) < 2 or not all(_vec(p) for p in pts):
                 vr.err(where, "points must be a list of at least 2 [x, y, z]")
+        elif t == "shell":
+            if num("thickness") <= 0:
+                vr.err(where, "thickness must be > 0")
+            if len(_ids(f.get("target"))) != 1:
+                vr.err(where, "shell needs exactly one target body")
+        elif t == "hole":
+            if num("d") <= 0:
+                vr.err(where, "d (diameter) must be > 0")
+            if not _vec(f.get("position")):
+                vr.err(where, "position must be [x, y, z] (centre of the hole on the entry face)")
+            if "direction" in f and (not _vec(f["direction"]) or np.linalg.norm(f["direction"]) < 1e-12):
+                vr.err(where, "direction must be a non-zero [x, y, z]")
+            if f.get("depth") not in (None, "through") and not (_isnum(f.get("depth")) and f["depth"] > 0):
+                vr.err(where, "depth must be > 0 or \"through\"")
+            if f.get("cbore") is not None and not (_vec(f["cbore"], 2) and f["cbore"][0] > num("d")):
+                vr.err(where, "cbore must be [diameter > d, depth]")
+            if f.get("csk") is not None and not (_vec(f["csk"], 2) and f["csk"][0] > num("d") and 0 < f["csk"][1] < 180):
+                vr.err(where, "csk must be [diameter > d, included angle deg (e.g. 90)]")
+        elif t == "loft":
+            secs = f.get("sections")
+            if not isinstance(secs, list) or len(secs) < 2:
+                vr.err(where, "sections must list at least 2 {plane, offset, loop}")
+            else:
+                for i, sec in enumerate(secs):
+                    if not isinstance(sec, dict) or "loop" not in sec:
+                        vr.err(where, f"section {i + 1} needs a 'loop'")
+                        continue
+                    _check_plane(vr, f"{where} section {i + 1}", sec.get("plane"))
+                    _check_loop(vr, f"{where} section {i + 1}", sec["loop"])
+        elif t == "sweep":
+            _check_plane(vr, where, f.get("plane"))
+            loops = f.get("loops")
+            if not isinstance(loops, list) or not loops:
+                vr.err(where, "loops must be a non-empty list of closed profiles")
+            else:
+                for i, lp in enumerate(loops):
+                    _check_loop(vr, f"{where} loop {i + 1}", lp)
+            h = f.get("helix")
+            if h is not None:
+                if not (isinstance(h, dict) and all(_isnum(h.get(k)) and h[k] > 0 for k in ("radius", "pitch", "turns"))):
+                    vr.err(where, "helix needs radius, pitch, turns > 0")
+            elif not (isinstance(f.get("path"), list) and len(f["path"]) >= 2 and all(_vec(q) for q in f["path"])):
+                vr.err(where, "sweep needs 'path' [[x,y,z], ...] (>= 2 points) or 'helix'")
         elif t == "fillet" and num("r") <= 0:
             vr.err(where, "r must be > 0")
         elif t == "chamfer" and num("d") <= 0:
@@ -497,14 +553,14 @@ def validate_features(features, max_features=400):
                 vr.err(where, "edges must be \"all\", a filter object or a list")
         # --- references
         refs = []
-        if t in ("boolean", "fillet", "chamfer", "transform", "pattern"):
+        if t in ("boolean", "fillet", "chamfer", "transform", "pattern", "shell", "hole"):
             tg = _ids(f.get("target"))
             if not tg:
                 vr.err(where, "target must list at least one id")
             refs = tg + (_ids(f.get("tool")) if t == "boolean" else [])
             if t == "boolean":
                 f["target"], f["tool"] = _ids(f.get("target")), _ids(f.get("tool"))
-            elif t in ("fillet", "chamfer"):
+            elif t in ("fillet", "chamfer", "shell", "hole"):
                 f["target"] = _ids(f.get("target"))
         bad = [r for r in refs if r not in alive]
         if bad:
@@ -516,8 +572,8 @@ def validate_features(features, max_features=400):
             else:
                 vr.err(where, f"references unknown id(s) {bad} (only earlier features can be referenced){hint}")
         kinds = {r: alive.get(r) for r in refs if r in alive}
-        if t in ("fillet", "chamfer") and any(v != "solid" for v in kinds.values()):
-            vr.err(where, "fillet/chamfer need solid targets")
+        if t in ("fillet", "chamfer", "shell", "hole") and any(v != "solid" for v in kinds.values()):
+            vr.err(where, f"{t} needs solid targets")
         # --- update alive set
         if t in _CONSUMES:
             for r in _ids(f.get("target")):

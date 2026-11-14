@@ -6,8 +6,10 @@ on every change, exactly like the history tree of a commercial CAD system:
   primitives : box, cylinder, sphere, cone, torus, wedge
   sketches   : extrude / revolve of 2D profiles (polylines with arcs/bulges, circles, rectangles,
                slots) on any plane; DXF profiles (dxf_extrude)
-  operations : boolean (fuse / cut / intersect), fillet, chamfer, transform (translate, rotate,
+  operations : boolean (fuse / cut / intersect), fillet, chamfer, shell (hollow with wall
+               thickness), hole (drilled / counterbored / countersunk), transform (translate, rotate,
                mirror, scale, copy), linear / circular pattern
+  advanced   : loft (through sections), sweep (profile along a path, spline or helix)
   import     : STEP / IGES / BREP (OpenCASCADE, unit conversion, healing), STL (faceted bodies)
 
 Topological naming: boundary conditions refer to faces/edges/bodies by tag *and* by a geometric
@@ -172,6 +174,23 @@ def _loop_area(lp):
 def sort_loops(loops):
     """Largest loop first (outer boundary), the rest are holes."""
     return sorted(loops, key=_loop_area, reverse=True)
+
+
+def _sweep_path(f):
+    """Path points of a sweep: "path" [[x,y,z],...] or "helix" {radius, pitch, turns, axis_point,
+    start_angle} (axis +z through axis_point)."""
+    if f.get("helix"):
+        h = f["helix"]
+        r, pitch, turns = float(h["radius"]), float(h["pitch"]), float(h["turns"])
+        c = np.asarray(h.get("axis_point", (0, 0, 0)), float)
+        a0 = np.radians(float(h.get("start_angle", 0.0)))
+        n = max(int(turns * 24), 8)
+        t = np.linspace(0, 2 * np.pi * turns, n + 1)
+        return np.stack([c[0] + r * np.cos(t + a0), c[1] + r * np.sin(t + a0), c[2] + pitch * t / (2 * np.pi)], 1)
+    pts = np.asarray(f.get("path"), float)
+    if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
+        raise GeometryError("sweep needs 'path' [[x,y,z],...] (>= 2 points) or 'helix'")
+    return pts
 
 
 def loop_polygon(lp, n_arc=16):
@@ -540,7 +559,115 @@ class CadModel:
             return out
         if t == "import":
             return self._import(g, f)
+        if t == "shell":                       # hollow solid: wall thickness, open faces removed
+            vols = self._ids_to_tags(bodies, f["target"])
+            occ.synchronize()
+            if len(vols) != 1:
+                raise GeometryError("shell needs exactly one target body")
+            open_faces = self._faces_for(g, vols, f.get("open_faces", []))
+            th = num("thickness", 1.0)
+            if th <= 0:
+                raise GeometryError("thickness must be > 0")
+            out = occ.addThickSolid(vols[0][1], open_faces, -th if not f.get("outward") else th)
+            occ.remove(vols, recursive=True)
+            return [x for x in out if x[0] == 3]
+        if t == "loft":                        # solid through sections (one closed loop each)
+            secs = f.get("sections") or []
+            if len(secs) < 2:
+                raise GeometryError("loft needs at least 2 sections")
+            wires = []
+            for sec in secs:
+                frame = plane_frame(sec.get("plane", "XY"))
+                if sec.get("offset"):
+                    o, ex, ey, ez = frame
+                    frame = (o + ez * float(sec["offset"]), ex, ey, ez)
+                wires.append(_Builder(g, frame).loop(sec["loop"]))
+            out = occ.addThruSections(wires, makeSolid=True, makeRuled=bool(f.get("ruled", False)))
+            return [x for x in out if x[0] == 3]
+        if t == "sweep":                       # profile swept along a path (polyline, spline, helix)
+            frame = plane_frame(f.get("plane", "XY"))
+            if f.get("offset"):
+                o, ex, ey, ez = frame
+                frame = (o + ez * float(f["offset"]), ex, ey, ez)
+            b = _Builder(g, frame)
+            surfs = [(2, b.face([outer] + holes)) for outer, holes in loop_regions(f["loops"])]
+            pts = _sweep_path(f)
+            ptags = [occ.addPoint(*map(float, q)) for q in pts]
+            if f.get("smooth") or f.get("helix"):
+                curves = [occ.addSpline(ptags)]
+            else:
+                curves = [occ.addLine(a, c) for a, c in zip(ptags[:-1], ptags[1:])]
+            wire = occ.addWire(curves)
+            out = occ.addPipe(surfs, wire, trihedron=f.get("trihedron", "DiscreteTrihedron" if not f.get("helix") else "Frenet"))
+            return [x for x in out if x[0] == 3]
+        if t == "hole":                        # drilled hole (+ counterbore / countersink) cut from a body
+            vols = self._ids_to_tags(bodies, f["target"])
+            p0 = np.asarray(f.get("position", (0, 0, 0)), float)
+            d = np.asarray(f.get("direction", (0, 0, -1)), float)
+            d = d / np.linalg.norm(d)
+            occ.synchronize()
+            bb = np.asarray(occ.getBoundingBox(*vols[0])) if len(vols) == 1 else None
+            depth = f.get("depth")
+            if depth in (None, "through"):
+                ext = float(np.linalg.norm(bb[3:] - bb[:3])) if bb is not None else 1e4
+                depth = 2 * ext
+            depth = float(depth)
+            r = num("d", 1.0) / 2
+            start = p0                                       # on the entry face, drilled along d
+            tools = [(3, occ.addCylinder(*(start - d * 0.01 * r), *(d * (depth + 0.01 * r)), r))]
+            if f.get("cbore"):                  # [diameter, depth]
+                cd, cdep = map(float, f["cbore"])
+                tools.append((3, occ.addCylinder(*(start - d * 0.01 * r), *(d * (cdep + 0.01 * r)), cd / 2)))
+            if f.get("csk"):                    # [diameter, included angle deg]
+                cd, ang = map(float, f["csk"])
+                h = (cd / 2 - r) / np.tan(np.radians(ang) / 2)
+                tools.append((3, occ.addCone(*(start - d * 0.01 * r), *(d * (h + 0.01 * r)), cd / 2 + 0.01 * r, r)))
+            out, _ = occ.cut(vols, tools, removeTool=True)
+            return [x for x in out if x[0] == 3]
         raise GeometryError(f"unknown feature type {t}")
+
+    def _faces_for(self, g, vols, spec):
+        """Faces of the target bodies selected by filters {"normal": v, "box": [...], "type": T}
+        or by centre {"com": [x, y, z]} (closest face)."""
+        faces = []
+        for v in vols:
+            faces += [abs(sf) for _, sf in g.model.getBoundary([v], oriented=False, recursive=False)]
+        if not spec:
+            return []
+        specs = spec if isinstance(spec, list) else [spec]
+        out = []
+        for sp in specs:
+            if isinstance(sp, (int, float)):
+                out.append(int(sp))
+                continue
+            cands = []
+            for fc in faces:
+                c = np.asarray(g.model.occ.getCenterOfMass(2, fc))
+                if "com" in sp and "normal" not in sp and "box" not in sp:
+                    cands.append((float(np.linalg.norm(c - np.asarray(sp["com"], float))), fc))
+                    continue
+                ok = True
+                if "normal" in sp:
+                    try:
+                        pr = g.model.getParametrizationBounds(2, fc)
+                        nrm = np.asarray(g.model.getNormal(fc, [(pr[0][0] + pr[1][0]) / 2, (pr[0][1] + pr[1][1]) / 2]))
+                    except Exception:  # noqa: BLE001
+                        nrm = np.zeros(3)
+                    n = np.asarray(sp["normal"], float)
+                    ok &= float(nrm @ n) / max(np.linalg.norm(n), 1e-30) > 0.996
+                if "box" in sp:
+                    b = np.asarray(sp["box"], float)
+                    ok &= bool(np.all(c >= b[:3] - 1e-6) and np.all(c <= b[3:] + 1e-6))
+                if "type" in sp:
+                    ok &= g.model.getType(2, fc).lower() == str(sp["type"]).lower()
+                if ok:
+                    out.append(fc)
+            if cands:
+                out.append(min(cands)[1])
+        out = sorted(set(out))
+        if spec and not out:
+            raise GeometryError(f"no face matches {spec}")
+        return out
 
     def _edges_for(self, g, vols, spec):
         edges = set()

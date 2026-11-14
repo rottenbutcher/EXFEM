@@ -20,7 +20,8 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "
 const uid = (p, list) => { let n = 1; const ids = new Set(list.map(x => x.id)); while (ids.has(p + n)) n++; return p + n; };
 
 const FEATURE_LABEL = { surface: "Surface", line: "Line", box: "Box", cylinder: "Cylinder", sphere: "Sphere", cone: "Cone", torus: "Torus", wedge: "Wedge", extrude: "Extrude",
-  revolve: "Revolve", dxf_extrude: "DXF Extrude", boolean: "Boolean", fillet: "Fillet", chamfer: "Chamfer", transform: "Transform", pattern: "Pattern", import: "Import" };
+  revolve: "Revolve", dxf_extrude: "DXF Extrude", boolean: "Boolean", fillet: "Fillet", chamfer: "Chamfer", transform: "Transform", pattern: "Pattern", import: "Import",
+  shell: "Shell", hole: "Hole", loft: "Loft", sweep: "Sweep" };
 const ICON = {
   model: "▣", geometry: "◈", feature: "▸", body: "■", materials: "◉", material: "●", connections: "⇄", contact: "⇄", named: "☰", ns: "▤",
   mesh: "▦", sizing: "◫", analysis: "⚙", settings: "⚙", support: "▼", load: "➜", thermal: "♨", solution: "✔", solinfo: "ℹ", result: "◐",
