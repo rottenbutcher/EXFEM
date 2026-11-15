@@ -1,4 +1,11 @@
-# gfem: GPU-accelerated nonlinear FEM with CAD and a Mechanical-style GUI
+<h1 align="center">gfem</h1>
+
+<p align="center">
+  <b>GPU-accelerated nonlinear finite element analysis with parametric CAD, a Mechanical-style
+  browser GUI, and an AI engineer that models, meshes and solves from plain language.</b>
+</p>
+
+<div align="center">
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![JAX](https://img.shields.io/badge/JAX-GPU%20%7C%20CPU-A8B9CC?logo=google&logoColor=white)](https://github.com/jax-ml/jax)
@@ -15,26 +22,47 @@
 [![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-gfem is an open-source structural/thermal finite element package written in Python on
-[JAX](https://github.com/jax-ml/jax). The same code runs on CPU, NVIDIA and AMD GPUs. It has three layers:
+</div>
 
-1. **Solver.** Batched element kernels (one `vmap` per element block), automatic-differentiation
-   tangents, matrix-free or element-by-element operators, AMG-preconditioned CG on the device.
-2. **CAD and interchange.** OpenCASCADE (through gmsh) for STEP/IGES/BREP/STL/DXF import and
-   parametric modelling, CAD-associative meshing, and Abaqus / Nastran / ANSYS solver-deck
-   readers and writers.
-3. **GUI.** A browser application laid out like ANSYS Mechanical: outline tree, details pane,
-   3D viewport with face/edge/vertex/body picking, a sketcher, a solution monitor and contour
-   results. Because it runs in a browser, the solver can sit on a remote GPU node while you work
-   from a laptop.
+<p align="center">
+  <img src="docs/img/static_bracket.png" alt="gfem Mechanical: static analysis of an L-bracket" width="100%">
+</p>
 
-Install (CPU: jax, scipy, gmsh/OpenCASCADE, pyamg, ezdxf, meshio):
+gfem is an open-source structural and thermal FE package written in Python on
+[JAX](https://github.com/jax-ml/jax). One code base runs on CPUs and on NVIDIA and AMD GPUs, from
+the element kernels to the Newton loop, contact, eigen-solvers and topology optimisation. It reads
+and writes Abaqus, Nastran and ANSYS decks, imports STEP/IGES/DXF, and comes with a browser GUI
+laid out like ANSYS Mechanical, which can drive a solver on a remote GPU node.
+
+## Highlights
+
+| Area | What you get |
+|---|---|
+| **GPU end to end** | batched `vmap` element kernels, AD tangents, AMG-PCG with the V-cycle on the device, LOBPCG eigen-solvers, multi-GPU sharding, mixed FP32/FP64 |
+| **Nonlinear mechanics** | NLGEOM, J2 plasticity, hyperelasticity, frictional contact, Riks, implicit and explicit dynamics, post-buckling |
+| **Solids, shells, beams** | C3D4–C3D20, MITC4 shells with finite rotations, Simo–Reissner beams, connectors, bolt pretension |
+| **Dynamics and fatigue** | modal, harmonic, response spectrum, random vibration (PSD), stress-life fatigue |
+| **Parametric CAD** | feature tree on OpenCASCADE, sketcher, booleans, fillets, loft, sweep, shell, holes, STEP/IGES/DXF |
+| **Industry formats** | Abaqus `.inp`, Nastran `.bdf`, ANSYS `.cdb`, gmsh, ParaView |
+| **Mechanical-style GUI** | outline tree, details pane, face picking, live convergence, contour results, animation |
+| **AI engineer** | sign in with Claude or ChatGPT; describe a part or attach a drawing; the model builds it, sets up the analysis, solves and checks your requirement |
+
+## Contents
+
+[Quick start](#quick-start) · [AI CAD and simulation](#ai-cad-and-ai-simulation) ·
+[Gallery](#gallery) · [The GUI](#the-gui) · [Capabilities](#capabilities) ·
+[GPU acceleration](#gpu-acceleration) · [Python API](#python-api) · [Verification](#verification) ·
+[Architecture](#architecture) · [Roadmap](#roadmap)
+
+## Quick start
+
+Install (CPU: JAX, SciPy, gmsh/OpenCASCADE, PyAMG, ezdxf, meshio):
 
 ```bash
 pip install -e ".[all]"
 ```
 
-NVIDIA GPU on **Linux or WSL2** (no code change):
+NVIDIA GPU on Linux or WSL2 (no code change):
 
 ```bash
 pip install "jax[cuda12]"
@@ -46,19 +74,19 @@ pip install "jax[cuda12]"
 > (`pip install -U jax jaxlib`) or use the GPU inside WSL2 (Ubuntu): install the NVIDIA driver on
 > Windows, then run `pip install "jax[cuda12]"` and gfem inside WSL2. AMD `jax[rocm]` is Linux-only too.
 
-Start the GUI, then open http://127.0.0.1:8765 in a browser:
+Start the GUI, then open http://127.0.0.1:8765:
 
 ```bash
 gfem gui
 ```
 
-If the `gfem` command is not found (Scripts folder not on PATH), use:
+If the `gfem` command is not found (Scripts folder not on PATH):
 
 ```bash
 python -m gfem gui
 ```
 
-Serve the GUI from a GPU workstation / cloud node:
+Serve the GUI from a GPU workstation or cloud node:
 
 ```bash
 gfem gui --host 0.0.0.0
@@ -70,7 +98,7 @@ Run a solver deck (Abaqus `.inp`, Nastran `.bdf/.nas`, ANSYS `.cdb`):
 gfem run job.inp
 ```
 
-Convert decks, mesh a CAD file, run the tests:
+Convert a deck, mesh a CAD file:
 
 ```bash
 gfem convert job.inp job.bdf
@@ -80,30 +108,188 @@ gfem convert job.inp job.bdf
 gfem mesh part.step -o part.inp --size 3
 ```
 
+Run the test suite:
+
 ```bash
 python -m pytest tests
 ```
 
-| | |
+Ready-to-run GUI projects, CAD files, solver decks and scripts are in
+[examples/](examples/README.md); AI prompts and a drawing are in [examples/ai/](examples/ai/README.md).
+
+## AI CAD and AI simulation
+
+<p align="center">
+  <img src="docs/img/ai_gallery.png" alt="Parts built by the AI from one sentence" width="100%">
+</p>
+
+Describe a part in plain language (any language) or attach a drawing (photo, screenshot, PDF, DXF).
+The model builds the part as a normal, editable gfem feature tree. In **Simulate** mode it also
+assigns materials, places supports and loads on the right faces, meshes, solves, reads the results
+and iterates until your requirement is met ("safety factor at least 2: make it thicker if not").
+Open it from **Home > AI CAD** or **Geometry > AI CAD**, or use `gfem ai` on the command line.
+
+**Sign in instead of an API key.** Pick **Claude account** or **ChatGPT account** and press
+**Sign in**. The official sign-in page of Claude Code or OpenAI Codex opens in your browser; after you
+sign in (paste the code if the page shows one), requests use your Claude Pro / Max / Team or ChatGPT
+Plus / Pro / Team plan. gfem runs the official CLI with gfem's CAD and simulation tools attached
+over MCP, with the CLI's own shell and file tools switched off, so the model can only work on your gfem
+model. You need the CLI once:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+```bash
+npm install -g @openai/codex
+```
+
+API keys (Anthropic, OpenAI) and local OpenAI-compatible servers (Ollama, vLLM, LM Studio) work as
+well: choose **API key**.
+
+How it works. The model never writes free-form code; it calls gfem tools:
+
+| Tool | What gfem does |
 |---|---|
-| ![bracket](docs/img/result_bracket.png) | ![contact](docs/img/contact.png) |
-| ![topology](docs/img/topology.png) | ![sketcher](docs/img/sketcher.png) |
+| `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image. Features: box, cylinder, cone, sphere, torus, wedge, sketch extrude / revolve, loft, sweep (path, spline, helix), shell, hole (counterbore, countersink, blind), boolean, fillet, chamfer, transform, pattern, sheet and wire bodies |
+| `get_model` | bodies and faces (id, type, centre, outward normal, area) for picking faces |
+| `set_material`, `add_condition` | library or custom material; supports and loads on faces chosen by id or by filters (normal, box, type, area, nearest) |
+| `set_analysis`, `set_mesh`, `solve` | any gfem analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
 
-See [examples/README.md](examples/README.md) for ready-to-run GUI projects, CAD files, solver decks and scripts.
+Every result goes back to the model, which checks it against your request and corrects itself.
+Other things the dialog does:
+- Thumbnails of every build appear under the preview; click one and **apply this build** to use an
+  earlier version.
+- **Report** downloads a Markdown record of the requests, results and the latest view.
+- When a solve fails, the dialog opens in Simulate mode with the error pre-filled, so the model can
+  find and fix the cause (missing support, empty selection, ...).
+Conditions created with a face filter are re-applied after a geometry change; a condition that no
+longer selects anything blocks the solve. The result is applied to your project (**Undo AI change**
+restores the previous state), and follow-up requests continue the same conversation.
 
-## What sets it apart from other open-source FE codes
+Command line:
 
-| | gfem | typical open-source FE |
-|---|---|---|
-| GPU | Everything (assembly, Newton, contact, explicit loop, topology optimisation) runs through JAX on GPU | CPU only, or GPU for the linear solver only |
-| New material | Write one stress (or energy) function; the consistent tangent comes from AD | Hand-derived tangent (UMAT) |
-| Memory | Matrix-free JVP tangent option; frozen AMG hierarchy; no global matrix needed | Assembled global matrix |
-| CAD | STEP/IGES/BREP import, parametric feature tree, sketcher, booleans, fillets, DXF profiles | Usually needs a separate pre-processor |
-| Boundary conditions | Applied to CAD faces; re-attached by geometric signature after edits (topological-naming repair) | Applied to mesh node/element sets |
-| Bonded contact | Dual-mortar MPC elimination, passes the non-conforming interface patch test | Penalty or node-to-surface |
-| Commercial-deck compatibility | Reads and writes Abaqus `.inp` and Nastran `.bdf`; reads ANSYS `.cdb` | Single native format |
-| GUI | Mechanical-style workflow in the browser, can run against a remote GPU server | Separate pre/post tools |
-| Optimisation | SIMP topology optimisation and batched multi-load-case solves on the GPU | Separate tools |
+```bash
+gfem ai --login claude-cli
+```
+
+```bash
+gfem ai "flange d120 x 15 mm, hub d60 x 40 with d30 bore, 6 bolt holes d11 on a d95 circle" -o flange.step
+```
+
+```bash
+gfem ai "model the part in this drawing, plate thickness 8 mm" --attach drawing.png -o part.gfem.json --preview part.png
+```
+
+```bash
+gfem ai "aluminium cantilever 200 x 20 x 10, fixed at x=0, 100 N down at the tip; safety factor >= 3" --simulate -o study.gfem.json
+```
+
+```bash
+gfem ai --status
+```
+
+The gfem tools can also be added to your own Claude Code or Codex sessions (then ask "build a ... with
+the gfem tools"):
+
+```bash
+gfem mcp --register claude
+```
+
+```bash
+gfem mcp --register codex
+```
+
+API keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
+never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
+use your account or credits.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/ai_cad.png" alt="AI CAD dialog"></td>
+    <td width="50%"><img src="docs/img/ai_simulate.png" alt="Result of an AI simulation in the GUI"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>AI CAD: signed in with a Claude account; build previews and the model's notes</sub></td>
+    <td align="center"><sub>AI simulation: geometry, supports, load and solve set up by the model</sub></td>
+  </tr>
+</table>
+
+## Gallery
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/vp_static_bracket.png" alt="Static analysis"></td>
+    <td width="50%"><img src="docs/img/vp_modal.png" alt="Modal analysis"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Static structural</b> – L-bracket, bolt holes fixed, pin load</sub></td>
+    <td align="center"><sub><b>Modal</b> – cantilever, first bending mode (91.2 Hz)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/vp_thermal_stress.png" alt="Thermal-stress analysis"></td>
+    <td><img src="docs/img/vp_plate_hole.png" alt="Plate with a hole"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Thermal-stress</b> – heat sink, flux and convection</sub></td>
+    <td align="center"><sub><b>Stress concentration</b> – plate with a hole under tension</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/vp_buckling.png" alt="Eigenvalue buckling"></td>
+    <td><img src="docs/img/vp_contact.png" alt="Contact"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Eigenvalue buckling</b> – Euler column, first mode</sub></td>
+    <td align="center"><sub><b>Contact</b> – punch pressed into a block</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/vp_rubber.png" alt="Hyperelastic large deformation"></td>
+    <td><img src="docs/img/vp_topology.png" alt="Topology optimisation"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Hyperelastic NLGEOM</b> – Neo-Hookean pad, 30 % compression</sub></td>
+    <td align="center"><sub><b>Topology optimisation</b> – SIMP cantilever design space</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/sketcher.png" alt="Sketcher"></td>
+    <td><img src="docs/img/mesh.png" alt="Mesh"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Sketcher</b> – profiles with arcs, DXF import, extrude / revolve</sub></td>
+    <td align="center"><sub><b>Meshing</b> – CAD-associative tetrahedral / hex meshes</sub></td>
+  </tr>
+</table>
+
+All of these are built-in examples (**Examples** menu); each solves in seconds on a laptop CPU.
+
+## The GUI
+
+`gfem gui` opens a Mechanical-style window in the browser:
+
+- **Ribbon**: Home / Geometry / Mesh / Environment / Solution / Results / Display.
+- **Outline tree**: Geometry (feature tree and bodies), Materials, Connections, Named Selections,
+  Mesh (sizing controls), the analysis (settings, supports, loads), and Solution (Solution
+  Information and result objects). Each item shows a status light. Right-click to delete,
+  suppress or edit; double-click to solve or mesh.
+- **Details pane**: an editable property grid for every object. Scope a condition by selecting
+  faces in the viewer and pressing **Apply**, or pick a named selection.
+- **Viewport**: selection filters (vertex/edge/face/body; Ctrl/Shift to add), standard views,
+  section plane, wireframe, edges, a triad, hover information, and drag-and-drop CAD or deck
+  import.
+- **Sketcher**: polyline/arc/rectangle/circle/slot with grid snap and numeric entry, DXF import,
+  extrude or revolve as a new body or add/cut.
+- **Solution Information**: live log, force-convergence chart (residual against cumulative
+  iteration), time/LPF and compliance histories.
+- **Results**: total/directional deformation, equivalent/principal/normal stress, stress
+  intensity, plastic strain, total strain, temperature, safety factor, topology density.
+  Banded or smooth contours with an ANSYS-style legend, Max/Min markers, a deformation scale
+  (auto/true/×N), animation of load history and mode shapes, probes, and tabular and graph views.
+- **Export**: Abaqus `.inp`, Nastran `.bdf`, STEP, STL, ParaView `.vtu`, CSV, PNG.
+- **AI CAD / AI simulation**: sign in with a Claude or ChatGPT account (or use an API key);
+  describe a part or attach a drawing, and the model builds it, checks it against measurements
+  and rendered views, and in Simulate mode sets up, solves and checks the analysis.
+- **Examples**: L-bracket, plate with hole (Kt), cantilever modal, column buckling, heat-sink
+  thermal-stress, topology optimisation, punch contact, rubber pad (hyperelastic NLGEOM).
 
 ## Capabilities
 
@@ -151,6 +337,46 @@ grounded), point masses, elastic (foundation) supports.
 the device with Chebyshev smoothing), reused across Newton iterations and rebuilt when PCG slows
 down • Jacobi-PCG • element-by-element stored tangents or fully matrix-free AD-JVP tangents.
 
+**CAD**: box, cylinder, sphere, cone, torus, wedge; loft; sweep along a path, spline or helix; shell (hollow parts); hole (through, blind, counterbore, countersink); sketch → extrude/revolve (polylines with
+arcs, circles, rectangles, slots, DXF import); boolean union/subtract/intersect; fillet and
+chamfer (edges selected in the viewer); move/rotate/mirror/scale/copy; linear and circular
+patterns; surface (sheet) and line (wire) bodies for shells and beams; STEP/IGES/BREP import with
+unit conversion and healing (surface-only files become sheet bodies); STL import; shared topology
+for conformal multi-body meshes (stringers embedded in skins stay beams); STEP/STL export.
+
+**Meshing**: gmsh tetrahedral (linear or quadratic), transfinite hex where possible, hex-dominant,
+quad-dominant shells on sheet bodies, beams on line bodies;
+global, curvature and local face/edge/body sizing; quality statistics (SICN histogram).
+Every CAD body, face, edge and vertex keeps its identity as a node/element set and surface.
+
+**Interchange**
+- Abaqus `.inp` read: parts and instances (translation/rotation), `*INCLUDE`, sets (GENERATE,
+  nested, instance-qualified), element/node surfaces, materials, `*TIE`, `*CONTACT PAIR`,
+  `*AMPLITUDE`, all procedures above, `*DSLOAD`/`*DLOAD` (P, TRVEC, GRAV, CENTRIF, Pn faces),
+  `*TEMPERATURE`, heat-transfer loads. Write: flat deck.
+- Nastran bulk data read/write: free, small and large field with continuations; GRID, CTETRA,
+  CHEXA, CPENTA, PSOLID, MAT1, MAT4, SPC/SPC1, FORCE, PLOAD4, GRAV, LOAD, TEMP, EIGRL, SOL
+  101/103/105/106.
+- ANSYS `.cdb` read: NBLOCK, EBLOCK (SOLID185/186/187/285 and degenerate forms), MPDATA, CMBLOCK
+  components, D, F, SFE.
+- gmsh `.msh`/UNV/MED read (physical groups become sets). ParaView `.vtu`/`.pvd` output; CSV.
+
+### Compared with typical open-source FE codes
+
+| | gfem | typical open-source FE |
+|---|---|---|
+| GPU | Everything (assembly, Newton, contact, explicit loop, topology optimisation) runs through JAX on GPU | CPU only, or GPU for the linear solver only |
+| New material | Write one stress (or energy) function; the consistent tangent comes from AD | Hand-derived tangent (UMAT) |
+| Memory | Matrix-free JVP tangent option; frozen AMG hierarchy; no global matrix needed | Assembled global matrix |
+| CAD | STEP/IGES/BREP import, parametric feature tree, sketcher, booleans, fillets, DXF profiles | Usually needs a separate pre-processor |
+| Boundary conditions | Applied to CAD faces; re-attached by geometric signature after edits (topological-naming repair) | Applied to mesh node/element sets |
+| Bonded contact | Dual-mortar MPC elimination, passes the non-conforming interface patch test | Penalty or node-to-surface |
+| Commercial-deck compatibility | Reads and writes Abaqus `.inp` and Nastran `.bdf`; reads ANSYS `.cdb` | Single native format |
+| GUI | Mechanical-style workflow in the browser, can run against a remote GPU server | Separate pre/post tools |
+| Optimisation | SIMP topology optimisation and batched multi-load-case solves on the GPU | Separate tools |
+
+## GPU acceleration
+
 **GPU (NVIDIA CUDA) acceleration**
 | Workload | GPU path |
 |---|---|
@@ -179,146 +405,6 @@ down • Jacobi-PCG • element-by-element stored tangents or fully matrix-free 
 `examples/gpu_showcase.py --n 60` runs a multi-million-dof static, 20-mode modal, buckling and
 256-load-case study and prints timings for a CPU/GPU comparison.
 
-**CAD**: box, cylinder, sphere, cone, torus, wedge; sketch → extrude/revolve (polylines with
-arcs, circles, rectangles, slots, DXF import); boolean union/subtract/intersect; fillet and
-chamfer (edges selected in the viewer); move/rotate/mirror/scale/copy; linear and circular
-patterns; surface (sheet) and line (wire) bodies for shells and beams; STEP/IGES/BREP import with
-unit conversion and healing (surface-only files become sheet bodies); STL import; shared topology
-for conformal multi-body meshes (stringers embedded in skins stay beams); STEP/STL export.
-
-**Meshing**: gmsh tetrahedral (linear or quadratic), transfinite hex where possible, hex-dominant,
-quad-dominant shells on sheet bodies, beams on line bodies;
-global, curvature and local face/edge/body sizing; quality statistics (SICN histogram).
-Every CAD body, face, edge and vertex keeps its identity as a node/element set and surface.
-
-**Interchange**
-- Abaqus `.inp` read: parts and instances (translation/rotation), `*INCLUDE`, sets (GENERATE,
-  nested, instance-qualified), element/node surfaces, materials, `*TIE`, `*CONTACT PAIR`,
-  `*AMPLITUDE`, all procedures above, `*DSLOAD`/`*DLOAD` (P, TRVEC, GRAV, CENTRIF, Pn faces),
-  `*TEMPERATURE`, heat-transfer loads. Write: flat deck.
-- Nastran bulk data read/write: free, small and large field with continuations; GRID, CTETRA,
-  CHEXA, CPENTA, PSOLID, MAT1, MAT4, SPC/SPC1, FORCE, PLOAD4, GRAV, LOAD, TEMP, EIGRL, SOL
-  101/103/105/106.
-- ANSYS `.cdb` read: NBLOCK, EBLOCK (SOLID185/186/187/285 and degenerate forms), MPDATA, CMBLOCK
-  components, D, F, SFE.
-- gmsh `.msh`/UNV/MED read (physical groups become sets). ParaView `.vtu`/`.pvd` output; CSV.
-
-## The GUI
-
-`gfem gui` opens a Mechanical-style window:
-
-- **Ribbon**: Home / Geometry / Mesh / Environment / Solution / Results / Display.
-- **Outline tree**: Geometry (feature tree and bodies), Materials, Connections, Named Selections,
-  Mesh (sizing controls), the analysis (settings, supports, loads), and Solution (Solution
-  Information and result objects). Each item shows a status light. Right-click to delete,
-  suppress or edit; double-click to solve or mesh.
-- **Details pane**: an editable property grid for every object. Scope a condition by selecting
-  faces in the viewer and pressing **Apply**, or pick a named selection.
-- **Viewport**: selection filters (vertex/edge/face/body; Ctrl/Shift to add), standard views,
-  section plane, wireframe, edges, a triad, hover information, and drag-and-drop CAD or deck
-  import.
-- **Sketcher**: polyline/arc/rectangle/circle/slot with grid snap and numeric entry, DXF import,
-  extrude or revolve as a new body or add/cut.
-- **Solution Information**: live log, force-convergence chart (residual against cumulative
-  iteration), time/LPF and compliance histories.
-- **Results**: total/directional deformation, equivalent/principal/normal stress, stress
-  intensity, plastic strain, total strain, temperature, safety factor, topology density.
-  Banded or smooth contours with an ANSYS-style legend, Max/Min markers, a deformation scale
-  (auto/true/×N), animation of load history and mode shapes, probes, and tabular and graph views.
-- **Export**: Abaqus `.inp`, Nastran `.bdf`, STEP, STL, ParaView `.vtu`, CSV, PNG.
-- **AI CAD / AI simulation**: sign in with a Claude or ChatGPT account (or use an API key);
-  describe a part or attach a drawing, and the model builds it, checks it against measurements
-  and rendered views, and in Simulate mode sets up, solves and checks the analysis.
-- **Examples**: L-bracket, plate with hole (Kt), cantilever modal, column buckling, heat-sink
-  thermal-stress, topology optimisation, punch contact, rubber pad (hyperelastic NLGEOM).
-
-## AI CAD and AI simulation (Claude or ChatGPT)
-
-Describe a part in plain language (any language) or attach a drawing (photo, screenshot, PDF, DXF).
-The model builds the part as a normal, editable gfem feature tree. In **Simulate** mode it also
-assigns materials, places supports and loads on the right faces, meshes, solves, reads the results
-and iterates until your requirement is met ("safety factor at least 2: make it thicker if not").
-Open it from **Home > AI CAD** or **Geometry > AI CAD**, or use `gfem ai` on the command line.
-
-![AI CAD](docs/img/ai_cad.png)
-
-**Sign in instead of an API key.** Pick **Claude account** or **ChatGPT account** and press
-**Sign in**. The official sign-in page of Claude Code or OpenAI Codex opens in your browser; after you
-sign in (paste the code if the page shows one), requests use your Claude Pro / Max / Team or ChatGPT
-Plus / Pro / Team plan. gfem runs the official CLI with gfem's CAD and simulation tools attached
-over MCP, with the CLI's own shell and file tools switched off, so the model can only work on your gfem
-model. You need the CLI once:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-```bash
-npm install -g @openai/codex
-```
-
-API keys (Anthropic, OpenAI) and local OpenAI-compatible servers (Ollama, vLLM, LM Studio) work as
-well: choose **API key**.
-
-How it works. The model never writes free-form code; it calls gfem tools:
-
-| Tool | What gfem does |
-|---|---|
-| `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image. Features: box, cylinder, cone, sphere, torus, wedge, sketch extrude / revolve, loft, sweep (path, spline, helix), shell, hole (counterbore, countersink, blind), boolean, fillet, chamfer, transform, pattern, sheet and wire bodies |
-| `get_model` | bodies and faces (id, type, centre, outward normal, area) for picking faces |
-| `set_material`, `add_condition` | library or custom material; supports and loads on faces chosen by id or by filters (normal, box, type, area, nearest) |
-| `set_analysis`, `set_mesh`, `solve` | any gfem analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
-
-Every result goes back to the model, which checks it against your request and corrects itself.
-Other things the dialog does:
-- Thumbnails of every build appear under the preview; click one and **apply this build** to use an
-  earlier version.
-- **Report** downloads a Markdown record of the requests, results and the latest view.
-- When a solve fails, the dialog opens in Simulate mode with the error pre-filled, so the model can
-  find and fix the cause (missing support, empty selection, ...).
-Conditions created with a face filter are re-applied after a geometry change; a condition that no
-longer selects anything blocks the solve. The result is applied to your project (**Undo AI change**
-restores the previous state), and follow-up requests continue the same conversation.
-
-![AI simulation](docs/img/ai_simulate.png)
-
-Command line:
-
-```bash
-gfem ai --login claude-cli
-```
-
-```bash
-gfem ai "flange d120 x 15 mm, hub d60 x 40 with d30 bore, 6 bolt holes d11 on a d95 circle" -o flange.step
-```
-
-```bash
-gfem ai "model the part in this drawing, plate thickness 8 mm" --attach drawing.png -o part.gfem.json --preview part.png
-```
-
-```bash
-gfem ai "aluminium cantilever 200 x 20 x 10, fixed at x=0, 100 N down at the tip; safety factor >= 3" --simulate -o study.gfem.json
-```
-
-```bash
-gfem ai --status
-```
-
-The gfem tools can also be added to your own Claude Code or Codex sessions (then ask "build a ... with
-the gfem tools"):
-
-```bash
-gfem mcp --register claude
-```
-
-```bash
-gfem mcp --register codex
-```
-
-API keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
-never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
-use your account or credits.
-
 ## Python API
 
 ```python
@@ -345,7 +431,7 @@ sp, stats = mesh_cad(cad, size=3.0, order=2)          # FACE_<id>, EDGE_<id>, BO
 model, results = run_spec(sp, "out", "job")
 ```
 
-## Verification (`tests/`)
+## Verification
 
 Patch tests for every element and every linear solver; J2 uniaxial with hardening (exact);
 nearly incompressible Neo-Hookean at stretch 2; cantilever against Timoshenko; Lamé thick
@@ -385,11 +471,16 @@ gfem/spec.py         neutral model shared by every front end
 gfem/analysis.py     Spec -> Model builder, procedure runner, post-processing
 gfem/io/             Abaqus, Nastran, ANSYS CDB, VTK
 gfem/cad/            OpenCASCADE feature tree, DXF, CAD-associative meshing
+gfem/cad/ai.py       AI CAD: validation, evaluation, previews, Claude / GPT agent loop
+gfem/cad/ai_cli.py   signed-in Claude Code / Codex CLIs (sign-in, runs, sessions)
+gfem/cad/ai_sim.py   AI simulation tools (materials, conditions, solve, results)
+gfem/cad/mcp_server.py  gfem tools as an MCP server
 gfem/project.py      GUI project model, units, material library
 gfem/gui/            HTTP/SSE server, examples, browser front-end (three.js)
 ```
 
 ## Roadmap
+
 Done in 0.3: friction, shells, beams, remote points, bolt pretension, LOBPCG, mixed precision,
 device direct solver, multi-GPU operator sharding, post-buckling, harmonic response.
 1. Self-contact, shell-edge contact, beam contact
@@ -401,4 +492,6 @@ device direct solver, multi-GPU operator sharding, post-buckling, harmonic respo
    translators, which an open-source package cannot ship. Save as STEP (AP203/214/242) or IGES
    from those systems; STEP keeps solids, sheets and wires, which gfem imports directly.
 
-License: Apache-2.0
+## License
+
+Apache-2.0
