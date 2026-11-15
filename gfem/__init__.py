@@ -13,18 +13,27 @@ import os as _os
 import jax
 
 jax.config.update("jax_enable_x64", True)
+# persistent XLA cache: element kernels / solvers compile once per machine, not once per run
+try:
+    _cache = _os.environ.get("GFEM_JAX_CACHE", _os.path.join(_os.path.expanduser("~"), ".cache", "gfem", "xla"))
+    _os.makedirs(_cache, exist_ok=True)
+    jax.config.update("jax_compilation_cache_dir", _cache)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.5)
+except Exception:  # noqa: BLE001
+    pass
 
 from .elements import (ELEMENTS, HEX8, HEX8_PLAIN, HEX20, HEX20R, TET4, TET10,   # noqa: E402
                        WEDGE6)
 from .materials import (LinearElastic, StVenantKirchhoff, NeoHookean, MooneyRivlin,  # noqa: E402
-                        Yeoh, OrthotropicElastic, J2Plasticity, J2FiniteStrain, UserMaterial)
+                        Yeoh, OrthotropicElastic, J2Plasticity, J2FiniteStrain, UserMaterial,
+                        ArrudaBoyce, Gent)
 from .model import Model                                                    # noqa: E402
 from .surfaces import Surface                                               # noqa: E402
 from .solvers import (Step, State, Monitor, StaticSolver, RiksSolver,       # noqa: E402
                       DynamicSolver, ExplicitSolver, modal, buckling, postbuckling, harmonic,
                       apply_imperfection)
 from .loads import Amplitude                                                # noqa: E402
-from . import mesh, constraints, contact, loads                             # noqa: E402
+from . import mesh, constraints, contact, loads, vibration, fatigue                             # noqa: E402
 
 __version__ = "0.3.0"
 

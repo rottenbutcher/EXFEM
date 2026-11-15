@@ -14,7 +14,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from .model import ops_matvec, ops_diagonal, ops_assemble
+from .model import ops_matvec, ops_diagonal, ops_assemble, csr_values, csr_matvec, gather_matvec
 from .constraints import Transformation, t_apply, t_apply_T
 from .loads import Amplitude, FollowerPressure, pressure_vector, smooth_step
 from . import linalg
@@ -221,18 +221,31 @@ def _ramp(t, T):
     return min(max(t / T, 0.0), 1.0) if T > 0 else 1.0
 
 
+def _diag_any(ops, nd):
+    if isinstance(ops, dict) and "plan" in ops:
+        return ops_diagonal(ops["blocks"] + list(ops["rest"]), nd)
+    if isinstance(ops, dict):
+        p = ops["pat"]
+        d = jnp.sum(jnp.where(p["ell_cols"] == jnp.arange(nd)[:, None], ops["vals"], 0.0), axis=1)
+        return d + ops_diagonal(ops["rest"], nd)
+    return ops_diagonal(ops, nd)
+
+
 # ------------------------------------------------------------------ linear system machinery
 class _LinearSystem:
     """Solves (free T^T K T free + fixed I) x = b with the chosen back-end."""
 
     def __init__(self, model, method="auto", tangent="ebe", cg_tol=1e-9, cg_maxiter=20000,
-                 monitor=None, multi_gpu=True):
+                 monitor=None, multi_gpu=True, operator="auto"):
         self.m = model
         if method == "auto":
             gpu = jax.default_backend() != "cpu"
             method = "direct" if (model.ndof <= (20000 if gpu else 40000)) else "amg"
         self.method, self.tangent = method, tangent
         self.multi_gpu = multi_gpu
+        # device CSR operator (atomic-free, less memory traffic) - default on GPUs
+        self.operator = operator if operator != "auto" else "gather"
+        self.async_amg = 150000          # dofs above which AMG setup runs in a background thread
         self.cg_tol, self.cg_maxiter = cg_tol, cg_maxiter
         self.amg = None
         self.amg_iters0 = None
@@ -243,7 +256,12 @@ class _LinearSystem:
 
         def opA(ops, free, tp, jv, v):
             w = t_apply(tp, free * v, nd)
-            y = ops_matvec(ops, w, nd)
+            if isinstance(ops, dict) and "plan" in ops:      # EbE GEMV + atomic-free gather assembly
+                y = gather_matvec(ops["plan"], ops["blocks"], w, nd) + ops_matvec(ops["rest"], w, nd)
+            elif isinstance(ops, dict):                      # device CSR + remaining EbE ops
+                y = csr_matvec(ops["pat"], ops["vals"], w, nd) + ops_matvec(ops["rest"], w, nd)
+            else:
+                y = ops_matvec(ops, w, nd)
             if jv is not None:
                 y = y + jv(w)
             return free * t_apply_T(tp, y, nd) + (1 - free) * v
@@ -257,6 +275,8 @@ class _LinearSystem:
         pre = amg.make() if amg is not None else None
         tol, maxit = self.cg_tol, self.cg_maxiter
 
+        nd = m.ndof
+
         def run(ops, b, free, tp, pp, jvp_args):
             if jvp_args is None:
                 jv = None
@@ -266,8 +286,34 @@ class _LinearSystem:
             A = lambda v: opA(ops, free, tp, jv, v)
             if kind == "jacobi":
                 M = lambda r: pp * r
+            elif kind == "cheby":
+                # setup-free Chebyshev-Jacobi polynomial preconditioner (device only)
+                dinv, lmax = pp["dinv"], pp["lmax"]
+
+                def M(r):
+                    lo, hi = lmax / 30.0, lmax
+                    th, de = 0.5 * (hi + lo), 0.5 * (hi - lo)
+                    sg = th / de
+                    rh = 1.0 / sg
+                    res = dinv * r
+                    d = res / th
+                    x = jnp.zeros_like(r)
+                    for _ in range(6):
+                        x = x + d
+                        res = res - dinv * A(d)
+                        rn = 1.0 / (2 * sg - rh)
+                        d = rn * rh * d + 2 * rn / de * res
+                        rh = rn
+                    return x + d
             else:
-                M = lambda r: free * pre(pp, free * r) + (1 - free) * r
+                # fine level smoothed with the *current* tangent: the frozen hierarchy only
+                # supplies the coarse spaces, so it stays effective as the Newton tangent evolves
+                if jv is None:
+                    dg = _diag_any(ops, nd)
+                    dinv0 = jnp.where(free > 0, 1.0 / jnp.where(jnp.abs(dg) > 0, dg, 1.0), 1.0)
+                    M = lambda r: free * pre(pp, free * r, A, dinv0) + (1 - free) * r
+                else:
+                    M = lambda r: free * pre(pp, free * r) + (1 - free) * r
             return linalg.pcg(A, b, M, tol=tol, maxiter=maxit)
         f = jax.jit(run)
         self._jit = {k: v for k, v in self._jit.items() if k[0] != kind} if kind == "amg" else self._jit
@@ -279,6 +325,22 @@ class _LinearSystem:
         A = setup.tr.project_matrix(A)
         return linalg.bc_matrix(A, setup.free_np)
 
+    def _lmax(self, ops, setup, tp, dinv):
+        """Largest eigenvalue of D^-1 A by power iteration on the device (Chebyshev bound)."""
+        if not hasattr(self, "_jlmax"):
+            opA = self._opA
+
+            def f(ops, free, tp, dinv):
+                v = jnp.sin(jnp.arange(free.shape[0]) * 0.37 + 0.1) * free + 1e-3
+                lam = 1.0
+                for _ in range(25):
+                    w = dinv * opA(ops, free, tp, None, v)
+                    lam = jnp.linalg.norm(w) / jnp.linalg.norm(v)
+                    v = w / jnp.linalg.norm(w)
+                return 1.1 * lam
+            self._jlmax = jax.jit(f)
+        return self._jlmax(ops, setup.free, tp, dinv)
+
     def _mixed(self, ops, b, setup, rebuild):
         """FP32 AMG-PCG inner solves + FP64 iterative refinement (defect correction).
         The FP64 residual keeps full accuracy while >95% of the flops run in FP32 - the fast
@@ -288,7 +350,7 @@ class _LinearSystem:
         nd = self.m.ndof
         if self.amg is None or rebuild:
             t0 = time.time()
-            self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
+            self.amg = linalg.AMG(self.assemble(self._full_ops if isinstance(ops, dict) else ops, setup), np.asarray(self.m.X),
                                   rot_mask=self.m.rot_mask() if self.m.rot_of else None)
             self.mon.log(f"    {self.amg.info()} (mixed FP32/FP64)  setup {time.time() - t0:.2f}s")
             self._mixed_fn = None
@@ -336,6 +398,20 @@ class _LinearSystem:
         if self.multi_gpu and jax.device_count() > 1 and self.method not in ("direct", "gpu_direct"):
             from .parallel import shard_ops
             ops = shard_ops(ops)
+        elif self.operator == "gather" and self.method in ("amg", "jacobi", "mixed", "cheby") and isinstance(ops, list) \
+                and len(ops) >= len(self.m.blocks) and self.m.blocks:
+            nb = len(self.m.blocks)
+            self._full_ops = ops
+            ops = dict(plan=self.m.gather(), blocks=list(ops[:nb]), rest=list(ops[nb:]))
+        elif self.operator == "csr" and self.method in ("amg", "jacobi") and jvp_args is None:
+            pat = self.m.csr()
+            nb = len(self.m.blocks)
+            if pat is not None and isinstance(ops, list) and len(ops) >= nb:
+                if not hasattr(self, "_jcsr"):
+                    self._jcsr = jax.jit(csr_values)
+                full = ops
+                ops = dict(pat=pat, vals=self._jcsr(pat, [K for _, K in ops[:nb]]), rest=list(ops[nb:]))
+                self._full_ops = full
         if self.method == "mixed" and jvp_args is None:
             return self._mixed(ops, b, setup, rebuild)
         if self.method == "gpu_direct":
@@ -347,17 +423,45 @@ class _LinearSystem:
             x = linalg.Direct(A).solve(np.asarray(b))
             self.last_iters = 1
             return jnp.asarray(x)
+        if self.method == "cheby":
+            d = _diag_any(ops, self.m.ndof)
+            dinv = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
+            x, k, rr = self._pcg_fn("cheby")(ops, b, setup.free, tp, dict(dinv=dinv, lmax=self._lmax(ops, setup, tp, dinv)), jvp_args)
+            self.last_iters = int(k)
+            return x
         if self.method == "jacobi":
-            d = ops_diagonal(ops, self.m.ndof)
+            d = _diag_any(ops, self.m.ndof)
             pp = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
             x, k, rr = self._pcg_fn("jacobi")(ops, b, setup.free, tp, pp, jvp_args)
         else:
-            if self.amg is None or rebuild:
-                t0 = time.time()
-                self.amg = linalg.AMG(self.assemble(ops, setup), np.asarray(self.m.X),
-                                      rot_mask=self.m.rot_mask() if self.m.rot_of else None)
+            fut = getattr(self, "_amg_future", None)
+            if fut is not None and fut.done():
+                self.amg, self._amg_future = fut.result(), None
                 self.amg_iters0 = None
-                self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
+                self.mon.log(f"    {self.amg.info()}  (built in background)")
+            if (self.amg is None or rebuild) and getattr(self, "_amg_future", None) is None:
+                full = self._full_ops if isinstance(ops, dict) else ops
+                rm = self.m.rot_mask() if self.m.rot_of else None
+                if self.m.ndof >= self.async_amg:
+                    # host AMG setup overlapped with device iterations (Chebyshev meanwhile)
+                    import concurrent.futures as cf
+                    A_host = self.assemble(full, setup)
+                    Xh = np.asarray(self.m.X)
+                    self._pool = getattr(self, "_pool", None) or cf.ThreadPoolExecutor(1)
+                    self._amg_future = self._pool.submit(linalg.AMG, A_host, Xh, rot_mask=rm)
+                    self.mon.log("    AMG setup started in background; Chebyshev-Jacobi PCG meanwhile")
+                else:
+                    t0 = time.time()
+                    self.amg = linalg.AMG(self.assemble(full, setup), np.asarray(self.m.X), rot_mask=rm)
+                    self.amg_iters0 = None
+                    self.mon.log(f"    {self.amg.info()}  setup {time.time() - t0:.2f}s")
+            if self.amg is None or (rebuild and getattr(self, "_amg_future", None) is not None):
+                d = _diag_any(ops, self.m.ndof)
+                dinv = jnp.where(setup.free > 0, 1.0 / jnp.where(jnp.abs(d) > 0, d, 1.0), 1.0)
+                lmax = self._lmax(ops, setup, tp, dinv)
+                x, k, rr = self._pcg_fn("cheby")(ops, b, setup.free, tp, dict(dinv=dinv, lmax=lmax), jvp_args)
+                self.last_iters = int(k)
+                return x
             x, k, rr = self._pcg_fn("amg", self.amg)(ops, b, setup.free, tp, self.amg.params(), jvp_args)
             k = int(k)
             if self.amg_iters0 is None:
@@ -387,21 +491,20 @@ class StaticSolver:
         X = m.X
         nd = m.ndof
 
-        @jax.jit
         def fint_all(u, s_old, fields, cps):
             f, s_new = m.internal_force(u, s_old, fields)
             for c, p in zip(inter, cps):
-                f = f + c.evaluate(X, u, p, nd)[0]
+                f = f + c.evaluate(m.X, u, p, nd)[0]
             return f, s_new
 
-        @jax.jit
         def tangent_ops(u, s_old, fields, cps):
             ops = m.stiffness_ops(u, s_old, fields) if tangent == "ebe" else []
             for c, p in zip(inter, cps):
-                ops.append(c.evaluate(X, u, p, nd)[1])
+                ops.append(c.evaluate(m.X, u, p, nd)[1])
             return ops
 
-        self._fint, self._ops = fint_all, tangent_ops
+        # model arrays are runtime arguments, not compile-time constants
+        self._fint, self._ops = m.jit(fint_all), m.jit(tangent_ops)
 
     # ---- helpers
     def _cps(self, u, lam=0.0):
@@ -823,13 +926,20 @@ class ExplicitSolver:
         T1 = setup.Tnew
         tp = tr.params()
 
+        bc_amp = jnp.asarray(setup.bc_amp)
+        bc_tgt = jnp.asarray(setup.target)
+        bc_u0 = jnp.asarray(setup.ustart)
+
         def one(carry, inp):
             u, v, s = carry
-            t, a_def, amps, tgt, cps, fs = inp
+            t, a_def, amps, avals, cps, fs = inp
+            # prescribed displacements evaluated on the device (no per-step host arrays)
+            ampv = jnp.concatenate([avals, jnp.zeros(1)])[jnp.maximum(bc_amp, 0)]
+            tgt = jnp.where(bc_amp < 0, bc_u0 + (bc_tgt - bc_u0) * a_def, bc_tgt * ampv)
             T = T0 + (T1 - T0) * a_def
             fint, sn = m.internal_force(u, s, dict(T=T))
             for ci, p in zip(inter, cps):
-                fint = fint + ci.evaluate(X, u, p, nd)[0]
+                fint = fint + ci.evaluate(m.X, u, p, nd)[0]
             fext = setup.fprev * (1 - a_def)
             for (k, g), a in zip(groups, amps):
                 fext = fext + g * a
@@ -845,13 +955,14 @@ class ExplicitSolver:
             vn = t_apply(tp, vn, nd) if tp is not None else vn
             return (un, vn, sn), None
 
-        @jax.jit
-        def chunk(u, v, s, ts, a_def, amps, tgts, cps, fs):
+        def chunk(u, v, s, ts, a_def, amps, avals, cps, fs):
             def body(cc, x):
-                t, ad, am, tg, f = x
-                return one(cc, (t, ad, am, tg, cps, f))
-            (u, v, s), _ = jax.lax.scan(body, (u, v, s), (ts, a_def, amps, tgts, fs))
+                t, ad, am, av_, f = x
+                return one(cc, (t, ad, am, av_, cps, f))
+            (u, v, s), _ = jax.lax.scan(body, (u, v, s), (ts, a_def, amps, avals, fs))
             return u, v, s
+
+        chunk = m.jit(chunk)
 
         t0 = time.time()
         done = 0
@@ -864,12 +975,11 @@ class ExplicitSolver:
             a_def = np.array([default(t, step.T) for t in ts])
             av = [[a(t) for a in setup.amps] for t in ts]
             amps = np.array([[ad if k < 0 else avi[k] for k, _ in groups] for ad, avi in zip(a_def, av)]).reshape(per, len(groups))
-            tg = np.stack([np.asarray(setup.prescribed(t)) for t in ts]) if setup.fixed.any() \
-                else np.zeros((per, nd))
+            avals = np.array(av, float).reshape(per, len(setup.amps))
             fs = np.array([[ad if k < 0 else avi[k] for _, k, _ in fol] for ad, avi in zip(a_def, av)]).reshape(per, len(fol))
             cps = [ci.params(X, u, float(a_def[0])) if ci.kind == "wall" else ci.params(X, u) for ci in inter]
             u, v, s = chunk(u, v, s, jnp.asarray(ts), jnp.asarray(a_def), jnp.asarray(amps),
-                            jnp.asarray(tg), cps, jnp.asarray(fs))
+                            jnp.asarray(avals), cps, jnp.asarray(fs))
             done += per
             tcur = min(done, nsteps) * dt
             ke = 0.5 * float(jnp.sum(M * v * v))
@@ -921,10 +1031,17 @@ def modal(model, step, state=None, monitor=None):
         if setup.tr.active:
             M = (setup.tr.T.T @ sp.diags(M) @ setup.tr.T).diagonal()
         Mk = sp.diags(M[keep]).tocsc()
-        nm = min(step.nmodes, K.shape[0] - 2)
-        sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
-        mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
-        w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
+        if K.shape[0] <= max(step.nmodes + 2, 60):          # tiny systems: dense
+            import scipy.linalg as sla
+            nm = min(step.nmodes, K.shape[0])
+            w2, V = sla.eigh(K.toarray(), Mk.toarray())
+            w2, V = w2[:nm], V[:, :nm]
+            mon.log(f"  modal: {K.shape[0]} free dofs, dense eigensolver")
+        else:
+            nm = min(step.nmodes, K.shape[0] - 2)
+            sigma = -abs(step.shift) if step.shift else -1e-6 * abs(K.diagonal()).max() / max(M.max(), 1e-300)
+            mon.log(f"  modal: {K.shape[0]} free dofs, {nm} modes (shift-invert Lanczos)")
+            w2, V = spla.eigsh(K, k=nm, M=Mk, sigma=sigma, which="LM")
         order = np.argsort(w2)
         w2, V = w2[order], V[:, order]
         w2 = np.maximum(w2, 0.0)

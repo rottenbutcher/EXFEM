@@ -1,0 +1,146 @@
+{
+ "version": 2,
+ "name": "Column buckling",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "box",
+    "name": "Column",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 20,
+    "dy": 20,
+    "dz": 400
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     9.999999999999998,
+     9.999999999999998,
+     200.0
+    ],
+    "size": 159999.99999999997
+   }
+  }
+ },
+ "mesh": {
+  "size": 6.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "buckling",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 4,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     5
+    ],
+    "sigs": [
+     {
+      "com": [
+       10.0,
+       10.0,
+       0.0
+      ],
+      "size": 399.99999999999994,
+      "type": "Plane"
+     }
+    ]
+   }
+  },
+  {
+   "id": "L1",
+   "type": "force",
+   "name": "Unit load",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     6
+    ],
+    "sigs": [
+     {
+      "com": [
+       10.0,
+       10.0,
+       400.0
+      ],
+      "size": 399.99999999999994,
+      "type": "Plane"
+     }
+    ]
+   },
+   "vector": [
+    0,
+    0,
+    -1.0
+   ]
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  }
+ ]
+}

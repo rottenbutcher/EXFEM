@@ -1,0 +1,21 @@
+*HEADING
+spring-mass oscillator: f = sqrt(k/m)/(2 pi) = 3.183 Hz  (units N, mm, t)
+*NODE
+1, 0., 0., 0.
+2, 100., 0., 0.
+*ELEMENT, TYPE=SPRINGA, ELSET=SP
+1, 1, 2
+*SPRING, ELSET=SP
+
+400.
+*ELEMENT, TYPE=MASS, ELSET=M
+2, 2
+*MASS, ELSET=M
+1.0
+*BOUNDARY
+1, 1, 3
+2, 2, 3
+*STEP
+*FREQUENCY
+1,
+*END STEP

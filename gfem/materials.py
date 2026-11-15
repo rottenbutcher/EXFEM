@@ -191,6 +191,35 @@ class Yeoh(Hyperelastic):
         return W
 
 
+class ArrudaBoyce(Hyperelastic):
+    """Eight-chain model (Abaqus *HYPERELASTIC, ARRUDA-BOYCE): mu, locking stretch lam_m, D."""
+    _C = (0.5, 1 / 20, 11 / 1050, 19 / 7000, 519 / 673750)
+
+    def __init__(self, mu, lam_m, D, **kw):
+        self.mu0, self.lm, self.D = float(mu), float(lam_m), float(D)
+        self.mu = self.mu0
+        self.lam = 2 / self.D - 2 * self.mu / 3
+        super().__init__(**kw)
+
+    def energy(self, F):
+        J, I1b, _ = self.invariants(F)
+        W = sum(c / self.lm ** (2 * i) * (I1b ** (i + 1) - 3 ** (i + 1)) for i, c in enumerate(self._C))
+        return self.mu0 * W + ((J * J - 1) / 2 - jnp.log(J)) / self.D
+
+
+class Gent(Hyperelastic):
+    """Gent model: W = -mu Jm/2 ln(1 - (I1b-3)/Jm) + volumetric (limiting chain extensibility)."""
+
+    def __init__(self, mu, Jm, D, **kw):
+        self.mu, self.Jm, self.D = float(mu), float(Jm), float(D)
+        self.lam = 2 / self.D - 2 * self.mu / 3
+        super().__init__(**kw)
+
+    def energy(self, F):
+        J, I1b, _ = self.invariants(F)
+        return -0.5 * self.mu * self.Jm * jnp.log(1 - (I1b - 3) / self.Jm) + ((J * J - 1) / 2 - jnp.log(J)) / self.D
+
+
 # ---------------------------------------------------------------- plasticity
 def _safe_norm(a):
     return jnp.sqrt(jnp.sum(a * a) + 1e-30)
@@ -340,6 +369,12 @@ def from_props(p, nlgeom=False, name=None):
         c = p.get("yeoh", [p.get("C10"), p.get("C20", 0), p.get("C30", 0), p.get("D1")])
         D1 = c[3] if len(c) > 3 and c[3] else 1e-3 / c[0]
         return Yeoh(c[0], c[1], c[2], D1, **common)
+    if model == "arruda":
+        D = p.get("D1") or 2 / (p.get("K", 1e3 * p["mu"]))
+        return ArrudaBoyce(p["mu"], p.get("lam_m", 7.0), D, **common)
+    if model == "gent":
+        D = p.get("D1") or 2 / (p.get("K", 1e3 * p["mu"]))
+        return Gent(p["mu"], p.get("Jm", 50.0), D, **common)
     if model == "ortho":
         return OrthotropicElastic(*p["ortho"], axes=p.get("axes"), nlgeom=nlgeom, **common)
     if model == "plastic":

@@ -141,36 +141,41 @@ class AMG:
         meta = [(lv["n"], lv["nc"], lv["rho"]) for lv in self.levels]
         deg = self.degree
 
-        def cheb(A, dinv, rho, n, x, b):
+        def cheb(Amv, dinv, rho, x, b):
             # Chebyshev smoother on D^-1 A over [rho/30, rho]
             lmax, lmin = rho, rho / 30.0
             theta, delta = 0.5 * (lmax + lmin), 0.5 * (lmax - lmin)
             sigma = theta / delta
             rh = 1.0 / sigma
-            r = dinv * (b - csr_mv(A, x, n))
+            r = dinv * (b - Amv(x))
             d = r / theta
             for _ in range(deg):
                 x = x + d
-                r = r - dinv * csr_mv(A, d, n)
+                r = r - dinv * Amv(d)
                 rh_new = 1.0 / (2 * sigma - rh)
                 d = rh_new * rh * d + 2 * rh_new / delta * r
                 rh = rh_new
             return x + d
 
-        def vcycle(p, lvl, b):
+        def vcycle(p, lvl, b, A0=None, dinv0=None):
             if lvl == len(meta):
                 L = p["coarse"]
                 y = jax.scipy.linalg.solve_triangular(L, b, lower=True)
                 return jax.scipy.linalg.solve_triangular(L.T, y, lower=False)
             n, nc, rho = meta[lvl]
             L = p["levels"][lvl]
-            x = cheb(L["A"], L["dinv"], rho, n, jnp.zeros_like(b), b)
-            r = b - csr_mv(L["A"], x, n)
+            if lvl == 0 and A0 is not None:          # current (matrix-free) fine operator
+                Amv, dinv = A0, dinv0
+            else:
+                Amv, dinv = (lambda v, A=L["A"], n=n: csr_mv(A, v, n)), L["dinv"]
+            x = cheb(Amv, dinv, rho, jnp.zeros_like(b), b)
+            r = b - Amv(x)
             xc = vcycle(p, lvl + 1, csr_mv(L["R"], r, nc))
             x = x + csr_mv(L["P"], xc, n)
-            return cheb(L["A"], L["dinv"], rho, n, x, b)
+            return cheb(Amv, dinv, rho, x, b)
 
-        return lambda p, r: vcycle(p, 0, r)
+        self.vcycle = vcycle
+        return lambda p, r, A0=None, dinv0=None: vcycle(p, 0, r, A0, dinv0)
 
 
 # ------------------------------------------------------------------ direct

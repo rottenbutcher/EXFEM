@@ -89,6 +89,7 @@ def read_bdf(path):
     grids, elems, props, mats, mat4 = {}, [], {}, {}, {}
     spcs, forces, ploads, gravs, combos, temps, eigrl = {}, {}, {}, {}, {}, {}, {}
     shellp, beamp, moments = {}, {}, {}
+    springs, pelas, pbush, conm = [], {}, {}, []
     for name, f in bulk:
         v = [_num(x) if isinstance(x, str) else x for x in f]
         v = [x for x in v]
@@ -107,6 +108,20 @@ def read_bdf(path):
             x1, x2, x3 = g(4), g(5), g(6)
             orient = ("G0", x1) if isinstance(x1, int) and x2 is None else ("V", (x1 or 0.0, x2 or 0.0, x3 or 0.0))
             elems.append((name, g(0), g(1), [g(2), g(3)], orient))
+        elif name in ("CELAS1", "CELAS2"):
+            if name == "CELAS2":
+                k_, g1, c1, g2, c2 = g(1, 0.0), g(2), g(3), g(4), g(5)
+            else:
+                k_, g1, c1, g2, c2 = ("PID", g(1)), g(2), g(3), g(4), g(5)
+            springs.append((g(0), k_, g1, c1, g2, c2))
+        elif name == "PELAS":
+            pelas[g(0)] = g(1, 0.0)
+        elif name == "CBUSH":
+            springs.append((g(0), ("PBUSH", g(1)), g(2), None, g(3), None))
+        elif name == "PBUSH":
+            pbush[g(0)] = [g(2, 0.0), g(3, 0.0), g(4, 0.0)]
+        elif name == "CONM2":
+            conm.append((g(0), g(1), g(3, 0.0)))
         elif name == "PSHELL":
             shellp[g(0)] = (g(1), g(2, 1.0))
         elif name in ("PBARL", "PBEAML"):
@@ -227,6 +242,27 @@ def read_bdf(path):
             sp.materials[f"MAT_{mid}"] = dict(mats[mid])
         sp.sections.append(dict(elset=es, material=f"MAT_{mid}", kind="beam", profile=prof[0],
                                 dims=[float(x) for x in prof[1]], n1=list(n1)))
+    for eid, k_, g1, c1, g2, c2 in springs:          # CELAS / CBUSH -> springs
+        if isinstance(k_, tuple):
+            kv = pbush.get(k_[1], [0.0, 0.0, 0.0]) if k_[0] == "PBUSH" else None
+            k_ = pelas.get(k_[1], 0.0) if k_[0] == "PID" else 0.0
+        else:
+            kv = None
+        if kv is None:
+            kv = [0.0, 0.0, 0.0]
+            comp = int(str(c1 or 1)[0])
+            if comp <= 3:
+                kv[comp - 1] = float(k_)
+        es = f"SPRING_{eid}"
+        if g2:
+            sp.add_elements("SPRING2", np.array([[idx[g1], idx[g2]]]), [eid], elset=es)
+        else:
+            sp.add_elements("SPRING1", np.array([[idx[g1]]]), [eid], elset=es)
+        sp.sections.append(dict(elset=es, material="", kind="spring", kvec=kv))
+    for eid, gn, mval in conm:
+        es = f"CONM2_{eid}"
+        sp.add_elements("MASS", np.array([[idx[gn]]]), [eid], elset=es)
+        sp.sections.append(dict(elset=es, material="", kind="mass", mass=float(mval)))
     # case control
     sub = {"SPC": None, "LOAD": None, "METHOD": None, "TEMP": None}
     for line in case:

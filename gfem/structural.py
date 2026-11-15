@@ -62,7 +62,12 @@ class StructType:
 S4 = StructType("S4", 4, 4, 9, "shell")
 S3 = StructType("S3", 3, 3, 5, "shell")
 B31 = StructType("B31", 2, 2, 3, "beam")
-STRUCT_ELEMENTS = {"S4": S4, "S4R": S4, "S4R5": S4, "S3": S3, "S3R": S3, "B31": B31, "B33": B31,
+SPRINGA = StructType("SPRINGA", 2, 2, 3, "spring")
+SPRING2T = StructType("SPRING2", 2, 2, 3, "spring")
+SPRING1T = StructType("SPRING1", 1, 1, 1, "spring")
+MASST = StructType("MASS", 1, 1, 1, "mass")
+STRUCT_ELEMENTS = {"SPRINGA": SPRINGA, "SPRING2": SPRING2T, "SPRING1": SPRING1T, "MASS": MASST,
+                   "CONN3D2": SPRING2T, "S4": S4, "S4R": S4, "S4R5": S4, "S3": S3, "S3R": S3, "B31": B31, "B33": B31,
                    "B31H": B31, "B21": B31}
 
 

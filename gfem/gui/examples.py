@@ -212,7 +212,33 @@ def ex_frame():
     return p
 
 
+def ex_seismic_frame():
+    p = ex_frame()
+    p["name"] = "3D frame - seismic response spectrum"
+    p["analysis"].update(type="response_spectrum", nmodes=12, direction=[1, 0, 0], combination="CQC",
+                         damping_ratio=0.05,
+                         spectrum=[[0.1, 980.0], [0.5, 2450.0], [2.0, 6130.0], [10.0, 6130.0], [33.0, 2450.0], [100.0, 1960.0]])
+    p["results"] = [dict(id="R1", type="total_deformation", name="Total Deformation (CQC)"),
+                    dict(id="R2", type="von_mises", name="Equivalent Stress (CQC)")]
+    return p
+
+
+def ex_random_bracket():
+    p = ex_bracket()
+    p["name"] = "L-bracket - random vibration + fatigue"
+    p["conditions"] = [c for c in p["conditions"] if c["type"] == "fixed"]
+    p["analysis"].update(type="random_vibration", nmodes=10, direction=[0, 1, 0], damping_ratio=0.02,
+                         psd=[[20.0, 1e4], [80.0, 4e5], [500.0, 4e5], [2000.0, 1e4]])
+    p["materials"][0].update(ultimate=460.0, Sf=750.0, b=-0.09, Se=0.0)
+    p["results"] = [dict(id="R1", type="total_deformation", name="1-sigma Deformation"),
+                    dict(id="R2", type="von_mises", name="1-sigma Equivalent Stress"),
+                    dict(id="R3", type="fatigue_sf", name="Fatigue Safety Factor (1-sigma)")]
+    return p
+
+
 EXAMPLES = {
+    "seismic": ("Seismic frame (response spectrum)", "CQC response-spectrum analysis of the beam frame.", ex_seismic_frame),
+    "random": ("Random vibration + fatigue", "Base PSD on the bracket, 1-sigma stress and fatigue safety factor.", ex_random_bracket),
     "panel": ("Stiffened panel (shell + beam)", "MITC4 shell skin with Timoshenko stringers, eigen buckling.", ex_stiffened_panel),
     "frame": ("3D steel frame (beams)", "I-section beam frame, natural frequencies.", ex_frame),
     "bracket": ("L-Bracket (static)", "Sketch-extruded bracket with bolt holes; fixed holes, pin load.", ex_bracket),

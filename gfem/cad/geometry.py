@@ -6,8 +6,10 @@ on every change, exactly like the history tree of a commercial CAD system:
   primitives : box, cylinder, sphere, cone, torus, wedge
   sketches   : extrude / revolve of 2D profiles (polylines with arcs/bulges, circles, rectangles,
                slots) on any plane; DXF profiles (dxf_extrude)
-  operations : boolean (fuse / cut / intersect), fillet, chamfer, transform (translate, rotate,
+  operations : boolean (fuse / cut / intersect), fillet, chamfer, shell (hollow with wall
+               thickness), hole (drilled / counterbored / countersunk), transform (translate, rotate,
                mirror, scale, copy), linear / circular pattern
+  advanced   : loft (through sections), sweep (profile along a path, spline or helix)
   import     : STEP / IGES / BREP (OpenCASCADE, unit conversion, healing), STL (faceted bodies)
 
 Topological naming: boundary conditions refer to faces/edges/bodies by tag *and* by a geometric
@@ -174,6 +176,212 @@ def sort_loops(loops):
     return sorted(loops, key=_loop_area, reverse=True)
 
 
+def _loop_edges(lp):
+    if "circle" in lp:
+        return 1
+    if "rect" in lp or "slot" in lp:
+        return 4
+    pts = lp["points"]
+    return len(pts) - (1 if len(pts) > 3 and np.allclose(pts[0], pts[-1]) else 0)
+
+
+def _circle_as_arcs(lp, n, a0=0.0):
+    """A circle as n equal arcs starting at angle a0 (so loft sections have matching edges)."""
+    cx, cy, r = map(float, lp["circle"])
+    t = a0 + np.linspace(0, 2 * np.pi, n, endpoint=False)
+    pts = [[cx + r * np.cos(a), cy + r * np.sin(a)] for a in t]
+    return dict(points=pts, bulges=[float(np.tan(np.pi / n / 2))] * n)
+
+
+def _loft_sections(loops):
+    """Aligned loft loops with matching edge counts."""
+    n = max(_loop_edges(lp) for lp in loops)
+    aligned = [None if "circle" in lp else _aligned_loop(lp) for lp in loops]
+    a0 = 0.0
+    ref = next((a for a in aligned if a is not None and "points" in a), None)
+    if ref is not None:                       # circles start where the polygons start: no twist
+        P = np.asarray(ref["points"], float)
+        c = P.mean(0)
+        a0 = float(np.arctan2(P[0, 1] - c[1], P[0, 0] - c[0]))
+    out = []
+    for lp, al in zip(loops, aligned):
+        if al is None:
+            al = _circle_as_arcs(lp, max(n, 2), a0) if n > 1 else lp
+        out.append(al)
+    return out
+
+
+def _aligned_loop(lp):
+    """Loft sections must start at corresponding points or the loft twists (self-intersecting
+    surfaces that break booleans). Circles start at +u; polygons (rect, points) are made
+    counter-clockwise and rotated to start at the vertex nearest the +u direction."""
+    if "circle" in lp:
+        return lp
+    if "slot" in lp:                           # same construction as _Builder.loop
+        x0, y0, x1, y1, r = map(float, lp["slot"])
+        d = np.array([x1 - x0, y1 - y0])
+        t = d / np.linalg.norm(d)
+        n = np.array([-t[1], t[0]])
+        a, b = np.array([x0, y0]), np.array([x1, y1])
+        lp = dict(points=[list(a + r * n), list(b + r * n), list(b - r * n), list(a - r * n)], bulges=[0, -1, 0, -1])
+    if "rect" in lp:
+        x0, y0, x1, y1 = map(float, lp["rect"])
+        lp = dict(points=[[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+    pts = [list(map(float, q)) for q in lp["points"]]
+    if len(pts) > 3 and np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    bul = list(lp.get("bulges") or [0.0] * len(pts))[:len(pts)]
+    bul += [0.0] * (len(pts) - len(bul))
+    P = np.asarray(pts)
+    if np.dot(P[:, 0], np.roll(P[:, 1], -1)) - np.dot(P[:, 1], np.roll(P[:, 0], -1)) < 0:
+        pts = pts[::-1]                                       # reverse direction: segment i -> i+1
+        bul = [-b for b in bul[::-1]]
+        bul = bul[1:] + bul[:1]
+        P = np.asarray(pts)
+    c = P.mean(0)
+    ang = np.abs(np.arctan2(P[:, 1] - c[1], P[:, 0] - c[0]))
+    k = int(np.argmin(ang))
+    return dict(points=pts[k:] + pts[:k], bulges=bul[k:] + bul[:k])
+
+
+def _thru_sections(occ, wires, ruled=False):
+    """addThruSections with a guaranteed outward orientation: OpenCASCADE sometimes returns an
+    inside-out solid (negative volume), which breaks every later boolean; rebuild reversed."""
+    out = [x for x in occ.addThruSections(wires, makeSolid=True, makeRuled=ruled) if x[0] == 3]
+    if out and sum(occ.getMass(*x) for x in out) < 0:
+        occ.remove(out, recursive=False)
+        out = [x for x in occ.addThruSections(list(reversed(wires)), makeSolid=True, makeRuled=ruled) if x[0] == 3]
+    return out
+
+
+def _offset_loop(lp, t):
+    """A sketch loop offset inward by t (rect, circle, slot exactly; polygons by mitred offset)."""
+    if "circle" in lp:
+        cx, cy, r = map(float, lp["circle"])
+        if r <= t:
+            raise GeometryError("wall thickness >= section radius")
+        return dict(circle=[cx, cy, r - t])
+    if "rect" in lp:
+        x0, y0, x1, y1 = map(float, lp["rect"])
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+        if x1 - x0 <= 2 * t or y1 - y0 <= 2 * t:
+            raise GeometryError("wall thickness too large for the section")
+        return dict(rect=[x0 + t, y0 + t, x1 - t, y1 - t])
+    if "slot" in lp:
+        x0, y0, x1, y1, r = map(float, lp["slot"])
+        if r <= t:
+            raise GeometryError("wall thickness >= slot radius")
+        return dict(slot=[x0, y0, x1, y1, r - t])
+    pts = np.asarray(lp["points"], float)
+    if len(pts) > 3 and np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    if lp.get("bulges") and any(abs(b) > 1e-12 for b in lp["bulges"]):
+        pts = loop_polygon(lp, n_arc=12)
+    area2 = np.dot(pts[:, 0], np.roll(pts[:, 1], -1)) - np.dot(pts[:, 1], np.roll(pts[:, 0], -1))
+    sgn = 1.0 if area2 > 0 else -1.0                    # counter-clockwise: inward normal is left
+    n = len(pts)
+    out = []
+    for i in range(n):
+        a, b, c = pts[i - 1], pts[i], pts[(i + 1) % n]
+        d1, d2 = (b - a) / np.linalg.norm(b - a), (c - b) / np.linalg.norm(c - b)
+        n1, n2 = sgn * np.array([-d1[1], d1[0]]), sgn * np.array([-d2[1], d2[0]])
+        m = n1 + n2
+        cosh = max(float(np.dot(m / np.linalg.norm(m), n1)), 0.2) if np.linalg.norm(m) > 1e-12 else 1.0
+        out.append(b + m / max(np.linalg.norm(m), 1e-12) * t / cosh)
+    return dict(points=[list(map(float, q)) for q in out])
+
+
+def _sweep_path(f):
+    """Path points of a sweep: "path" [[x,y,z],...] or "helix" {radius, pitch, turns, axis_point,
+    start_angle} (axis +z through axis_point)."""
+    if f.get("helix"):
+        h = f["helix"]
+        r, pitch, turns = float(h["radius"]), float(h["pitch"]), float(h["turns"])
+        c = np.asarray(h.get("axis_point", (0, 0, 0)), float)
+        a0 = np.radians(float(h.get("start_angle", 0.0)))
+        n = max(int(turns * 24), 8)
+        t = np.linspace(0, 2 * np.pi * turns, n + 1)
+        return np.stack([c[0] + r * np.cos(t + a0), c[1] + r * np.sin(t + a0), c[2] + pitch * t / (2 * np.pi)], 1)
+    pts = np.asarray(f.get("path"), float)
+    if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
+        raise GeometryError("sweep needs 'path' [[x,y,z],...] (>= 2 points) or 'helix'")
+    return pts
+
+
+def loop_polygon(lp, n_arc=16):
+    """Closed polygon approximation (N, 2) of a sketch loop (arcs discretised)."""
+    if "circle" in lp:
+        cx, cy, r = map(float, lp["circle"])
+        t = np.linspace(0, 2 * math.pi, 4 * n_arc, endpoint=False)
+        return np.stack([cx + r * np.cos(t), cy + r * np.sin(t)], 1)
+    if "rect" in lp:
+        x0, y0, x1, y1 = map(float, lp["rect"])
+        return np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+    if "slot" in lp:
+        x0, y0, x1, y1, r = map(float, lp["slot"])
+        d = np.array([x1 - x0, y1 - y0])
+        a0 = math.atan2(d[1], d[0])
+        t1 = np.linspace(a0 - math.pi / 2, a0 + math.pi / 2, n_arc)
+        t0 = t1 + math.pi
+        return np.concatenate([np.stack([x1 + r * np.cos(t1), y1 + r * np.sin(t1)], 1),
+                               np.stack([x0 + r * np.cos(t0), y0 + r * np.sin(t0)], 1)])
+    pts = [np.asarray(p, float)[:2] for p in lp["points"]]
+    if len(pts) > 2 and np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    bul = list(lp.get("bulges") or []) + [0.0] * len(pts)
+    out = []
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        out.append(a)
+        if abs(bul[i]) > 1e-12 and np.linalg.norm(b - a) > 0:
+            c, r, th = _arc_center(a, b, bul[i])
+            a0 = math.atan2(a[1] - c[1], a[0] - c[0])
+            for k in range(1, n_arc):
+                ang = a0 + th * k / n_arc
+                out.append(c + r * np.array([math.cos(ang), math.sin(ang)]))
+    return np.asarray(out)
+
+
+def _point_in_poly(p, poly):
+    x, y = p
+    inside = False
+    xs, ys = poly[:, 0], poly[:, 1]
+    xj, yj = np.roll(xs, 1), np.roll(ys, 1)
+    for xi, yi, xk, yk in zip(xs, ys, xj, yj):
+        if (yi > y) != (yk > y) and x < (xk - xi) * (y - yi) / (yk - yi + 1e-300) + xi:
+            inside = not inside
+    return inside
+
+
+def loop_regions(loops):
+    """Group sketch loops into regions [(outer, [holes])] by nesting depth: a loop inside an
+    even number of loops is an outer boundary, inside an odd number it is a hole of the
+    innermost loop that contains it (islands inside holes become new regions)."""
+    loops = sort_loops(loops)
+    polys = [loop_polygon(lp) for lp in loops]
+    parent, depth = [], []
+    for i, lp in enumerate(loops):
+        probe = polys[i].mean(0) if "circle" in lp else polys[i][0]
+        par = -1
+        for j in range(i - 1, -1, -1):           # smallest containing loop first (sorted by area)
+            if _loop_area(loops[j]) > _loop_area(lp) and all(
+                    _point_in_poly(q, polys[j]) for q in (polys[i][0], polys[i][len(polys[i]) // 2], probe)):
+                par = j
+                break
+        parent.append(par)
+        depth.append(0 if par < 0 else depth[par] + 1)
+    regions = []
+    index = {}
+    for i, lp in enumerate(loops):
+        if depth[i] % 2 == 0:
+            index[i] = len(regions)
+            regions.append((lp, []))
+        else:
+            regions[index[parent[i]]][1].append(lp)
+    return regions
+
+
 # ------------------------------------------------------------------ DXF
 def dxf_loops(path, layer=None, tol=1e-6):
     """Closed profiles from a DXF file: LWPOLYLINE/POLYLINE (bulges), CIRCLE, and chains of
@@ -256,16 +464,17 @@ class CadModel:
             g.clear()
             g.model.add("cad")
             g.option.setString("Geometry.OCCTargetUnit", _OCC_UNIT.get(self.units, "MM"))
+            g.option.setNumber("Geometry.OCCBoundsUseStl", 1)      # tight boxes for spline faces
             occ = g.model.occ
             self.messages = []
             bodies = {}                # feature id -> [(3, tag)]
             owner = {}                 # tag -> feature id
             self.stl_mode = any(f.get("type") == "import" and str(f.get("file", "")).lower().endswith(".stl")
                                 for f in self.features if not f.get("suppressed"))
-            for f in self.features:
+            for k, f in enumerate(self.features):
                 if f.get("suppressed"):
                     continue
-                fid = f.get("id") or f"F{len(bodies) + 1}"
+                fid = f.get("id") or f"F{k + 1}"
                 try:
                     out = self._feature(g, f, bodies)
                 except Exception as e:      # noqa: BLE001
@@ -280,7 +489,8 @@ class CadModel:
                 bounded = {abs(t) for v in vols for _, t in g.model.getBoundary([v], oriented=False)}
                 sheets = [(2, t) for _, t in g.model.getEntities(2) if t not in bounded]
                 on_face = {abs(t) for _, f in g.model.getEntities(2) for _, t in g.model.getBoundary([(2, f)], oriented=False)}
-                curves = [(1, t) for _, t in g.model.getEntities(1) if t not in on_face]
+                curves = [(1, t) for _, t in g.model.getEntities(1)
+                          if t not in on_face and not len(g.model.getAdjacencies(1, t)[0])]
                 vols = vols + sheets + curves
                 if self.share_topology and len(vols) > 1:
                     try:
@@ -354,29 +564,36 @@ class CadModel:
                                           bulges=L.get("bulges")))
             if not loops:
                 raise GeometryError("empty sketch")
-            loops = sort_loops(loops)
-            # separate disjoint outer regions: a loop is a hole if inside the first loop's bbox area
+            # disjoint outer regions, holes and islands (nesting depth)
             b = _Builder(g, frame)
-            outer, holes = loops[0], loops[1:]
-            surf = b.face([outer] + holes)
+            surfs = [(2, b.face([outer] + holes)) for outer, holes in loop_regions(loops)]
             if t == "revolve":
                 ax = f.get("axis", [[0, 0], [0, 1]])
                 p0 = o + ax[0][0] * ex + ax[0][1] * ey
                 p1 = o + ax[1][0] * ex + ax[1][1] * ey
                 d = p1 - p0
-                out = occ.revolve([(2, surf)], *p0, *d, math.radians(num("angle", 360.0)))
+                if np.linalg.norm(d) < 1e-12:
+                    raise GeometryError("revolve axis has zero length")
+                out = occ.revolve(surfs, *p0, *d, math.radians(num("angle", 360.0)))
             else:
                 dist = num("distance", 10.0)
+                if abs(dist) < 1e-12:
+                    raise GeometryError("extrude distance is zero")
                 if f.get("symmetric"):
-                    occ.translate([(2, surf)], *(-ez * dist / 2))
-                out = occ.extrude([(2, surf)], *(ez * dist))
-            return [x for x in out if x[0] == 3]
+                    occ.translate(surfs, *(-ez * dist / 2))
+                out = occ.extrude(surfs, *(ez * dist))
+            out = [x for x in out if x[0] == 3]
+            if len(out) > 1 and f.get("fuse_regions", False):
+                out, _ = occ.fuse(out[:1], out[1:])
+                out = [x for x in out if x[0] == 3]
+            return out
         if t == "surface":                     # planar sheet body from a sketch (shell mesh)
             frame = plane_frame(f.get("plane", "XY"))
             if f.get("offset"):
                 o, ex, ey, ez = frame
                 frame = (o + ez * float(f["offset"]), ex, ey, ez)
-            return [(2, _Builder(g, frame).face(sort_loops(f["loops"])))]
+            b = _Builder(g, frame)
+            return [(2, b.face([outer] + holes)) for outer, holes in loop_regions(f["loops"])]
         if t == "line":                        # polyline wire body (beam mesh)
             pts = [occ.addPoint(*map(float, p)) for p in f["points"]]
             if f.get("closed"):
@@ -384,6 +601,9 @@ class CadModel:
             return [(1, occ.addLine(a, b)) for a, b in zip(pts[:-1], pts[1:])]
         if t == "boolean":
             op = f.get("op", "fuse")
+            tgt = f["target"] if isinstance(f["target"], list) else [f["target"]]
+            if not f.get("tool") and op == "fuse" and len(tgt) > 1:      # fuse a list of bodies
+                f = dict(f, target=tgt[:1], tool=tgt[1:])
             obj = self._ids_to_tags(bodies, f["target"])
             tool = self._ids_to_tags(bodies, f["tool"]) if not f.get("keep_tool") else \
                 [x for i in f["tool"] for x in bodies[i]]
@@ -395,7 +615,8 @@ class CadModel:
             occ.synchronize()
             edges = self._edges_for(g, vols, f.get("edges", "all"))
             if not edges:
-                raise GeometryError("no edges selected")
+                raise GeometryError("no edges selected. Edges of the target (type, midpoint com, length): "
+                                    + self._edge_listing(g, vols))
             if t == "fillet":
                 out = occ.fillet([v[1] for v in vols], edges, [num("r", 1.0)], removeVolume=True)
             else:
@@ -405,6 +626,10 @@ class CadModel:
                     surfs.append(up[0])
                 out = occ.chamfer([v[1] for v in vols], edges, surfs, [num("d", 1.0)], removeVolume=True)
             return [x for x in out if x[0] == 3]
+        if t in ("transform", "pattern"):
+            for i in (f["target"] if isinstance(f["target"], list) else [f["target"]]):
+                if i not in bodies:
+                    raise GeometryError(f"unknown or consumed feature {i}")
         if t == "transform":
             vols = list(bodies.get(f["target"][0] if isinstance(f["target"], list) else f["target"], []))
             for i in (f["target"] if isinstance(f["target"], list) else [f["target"]])[1:]:
@@ -451,7 +676,248 @@ class CadModel:
             return out
         if t == "import":
             return self._import(g, f)
+        if t == "shell":                       # hollow solid: wall thickness, open faces removed
+            vols = self._ids_to_tags(bodies, f["target"])
+            occ.synchronize()
+            if len(vols) != 1:
+                raise GeometryError("shell needs exactly one target body")
+            open_faces = self._faces_for(g, vols, f.get("open_faces", []))
+            th = num("thickness", 1.0)
+            if th <= 0:
+                raise GeometryError("thickness must be > 0")
+            v0 = occ.getMass(*vols[0])
+            bb0 = np.asarray(occ.getBoundingBox(*vols[0]))
+            tol = 1e-6 * float(np.linalg.norm(bb0[3:] - bb0[:3])) + 1e-9
+
+            occ.synchronize()
+            all_faces = [abs(t) for _, t in g.model.getBoundary(vols, oriented=False, recursive=False)]
+            a_wall = sum(occ.getMass(2, t) for t in all_faces if t not in set(open_faces))
+            v_thin = th * a_wall                      # thin-wall estimate of the shell volume
+
+            def sane(res):
+                res = [x for x in res if x[0] == 3]
+                if not res:
+                    return False
+                try:
+                    occ.synchronize()
+                    for x in res:
+                        g.model.getBoundingBox(*x)
+                    vs = [occ.getMass(*x) for x in res]
+                    v = sum(vs)
+                except Exception:  # noqa: BLE001
+                    return False
+                if min(vs) <= 0:                      # an inside-out solid hides in the sum
+                    return False
+                if not (0 < v < v0 * (1 - 1e-9)) and not f.get("outward"):
+                    return False
+                if not f.get("outward") and not (0.35 * min(v_thin, v0) <= v <= 1.3 * v_thin):
+                    return False
+                if not f.get("outward"):
+                    for x in res:
+                        bb = np.asarray(occ.getBoundingBox(*x))
+                        if np.any(bb[:3] < bb0[:3] - 1e3 * tol) or np.any(bb[3:] > bb0[3:] + 1e3 * tol):
+                            return False
+                return True
+            err, out = None, None
+            before = set(occ.getEntities(3)) - set(vols)
+
+            def finish(res):
+                res = [x for x in res if x[0] == 3]
+                stray = [x for x in occ.getEntities(3) if x not in before and x not in res]
+                if stray:
+                    occ.remove(stray, recursive=True)
+                occ.synchronize()
+                try:                                  # the result must still be a valid solid
+                    vfs = [occ.getMass(*x) for x in res]
+                    vfin = sum(vfs) if min(vfs) > 0 else -1.0
+                    for x in res:
+                        g.model.getBoundingBox(*x)
+                except Exception:  # noqa: BLE001
+                    vfin = -1.0
+                if not (0 < vfin <= 1.3 * v_thin or f.get("outward")):
+                    raise GeometryError("could not build a valid shell for this shape; try a smaller thickness, "
+                                        "other open faces, or build the inner shape as a second body and cut it")
+                return res
+            # try OpenCASCADE's offset on a copy, so the original survives for the fallback
+            occ.synchronize()
+            faces0 = [abs(t) for _, t in g.model.getBoundary(vols, oriented=False, recursive=False)]
+            trial = occ.copy(vols)
+            occ.synchronize()
+            faces1 = [abs(t) for _, t in g.model.getBoundary(trial, oriented=False, recursive=False)]
+            fmap = dict(zip(faces0, faces1)) if len(faces0) == len(faces1) else {}
+            try:
+                if open_faces and not fmap:
+                    raise GeometryError("cannot map open faces")
+                out = occ.addThickSolid(trial[0][1], [fmap[t] for t in open_faces], -th if not f.get("outward") else th)
+                if not open_faces and not f.get("outward"):
+                    # a closed shell: OpenCASCADE returns the inner offset solid -> hollow = original - inner
+                    keep = occ.copy(vols)
+                    out, _ = occ.cut(keep, [x for x in out if x[0] == 3], removeObject=True, removeTool=True)
+                if not sane(out):
+                    occ.remove([x for x in out if x[0] == 3], recursive=True)
+                    err, out = "OpenCASCADE returned an invalid thick solid", None
+            except Exception as e:  # noqa: BLE001
+                err, out = str(e), None
+            try:
+                occ.remove(trial, recursive=True)
+            except Exception:  # noqa: BLE001
+                pass
+            if out is not None:
+                return finish(out)
+            src = self._source_loft(f["target"])
+            if src is not None and not f.get("outward"):
+                try:
+                    out = self._shell_loft(g, vols, src, th, open_faces)
+                except Exception as e:  # noqa: BLE001
+                    err, out = f"{err}; loft fallback: {e}", None
+                if out is not None and sane(out):
+                    return finish(out)
+                if out is not None:
+                    occ.remove([x for x in out if x[0] == 3], recursive=True)
+            raise GeometryError(f"{err}; try a smaller thickness, other open faces, or build the inner shape "
+                                "as a second body and cut it")
+        if t == "loft":                        # solid through sections (one closed loop each)
+            secs = f.get("sections") or []
+            if len(secs) < 2:
+                raise GeometryError("loft needs at least 2 sections")
+            wires = []
+            loops = _loft_sections([sec["loop"] for sec in secs])
+            for sec, lp in zip(secs, loops):
+                frame = plane_frame(sec.get("plane", "XY"))
+                if sec.get("offset"):
+                    o, ex, ey, ez = frame
+                    frame = (o + ez * float(sec["offset"]), ex, ey, ez)
+                wires.append(_Builder(g, frame).loop(lp))
+            return _thru_sections(occ, wires, bool(f.get("ruled", False)))
+        if t == "sweep":                       # profile swept along a path (polyline, spline, helix)
+            frame = plane_frame(f.get("plane", "XY"))
+            if f.get("offset"):
+                o, ex, ey, ez = frame
+                frame = (o + ez * float(f["offset"]), ex, ey, ez)
+            b = _Builder(g, frame)
+            surfs = [(2, b.face([outer] + holes)) for outer, holes in loop_regions(f["loops"])]
+            pts = _sweep_path(f)
+            ptags = [occ.addPoint(*map(float, q)) for q in pts]
+            if f.get("smooth") or f.get("helix"):
+                curves = [occ.addSpline(ptags)]
+            else:
+                curves = [occ.addLine(a, c) for a, c in zip(ptags[:-1], ptags[1:])]
+            wire = occ.addWire(curves)
+            out = occ.addPipe(surfs, wire, trihedron=f.get("trihedron", "DiscreteTrihedron" if not f.get("helix") else "Frenet"))
+            return [x for x in out if x[0] == 3]
+        if t == "hole":                        # drilled hole (+ counterbore / countersink) cut from a body
+            vols = self._ids_to_tags(bodies, f["target"])
+            p0 = np.asarray(f.get("position", (0, 0, 0)), float)
+            d = np.asarray(f.get("direction", (0, 0, -1)), float)
+            d = d / np.linalg.norm(d)
+            occ.synchronize()
+            bb = np.asarray(occ.getBoundingBox(*vols[0])) if len(vols) == 1 else None
+            depth = f.get("depth")
+            if depth in (None, "through"):
+                ext = float(np.linalg.norm(bb[3:] - bb[:3])) if bb is not None else 1e4
+                depth = 2 * ext
+            depth = float(depth)
+            r = num("d", 1.0) / 2
+            start = p0                                       # on the entry face, drilled along d
+            tools = [(3, occ.addCylinder(*(start - d * 0.01 * r), *(d * (depth + 0.01 * r)), r))]
+            if f.get("cbore"):                  # [diameter, depth]
+                cd, cdep = map(float, f["cbore"])
+                tools.append((3, occ.addCylinder(*(start - d * 0.01 * r), *(d * (cdep + 0.01 * r)), cd / 2)))
+            if f.get("csk"):                    # [diameter, included angle deg]
+                cd, ang = map(float, f["csk"])
+                h = (cd / 2 - r) / np.tan(np.radians(ang) / 2)
+                tools.append((3, occ.addCone(*(start - d * 0.01 * r), *(d * (h + 0.01 * r)), cd / 2 + 0.01 * r, r)))
+            out, _ = occ.cut(vols, tools, removeTool=True)
+            return [x for x in out if x[0] == 3]
         raise GeometryError(f"unknown feature type {t}")
+
+    def _source_loft(self, target):
+        """The loft feature that produced `target` (directly or through fillet-free renames)."""
+        tid = target[0] if isinstance(target, list) else target
+        f = next((x for x in self.features if x.get("id") == tid), None)
+        return f if f is not None and f.get("type") == "loft" else None
+
+    def _shell_loft(self, g, vols, loft, th, open_faces):
+        """Shell fallback for lofted bodies (OpenCASCADE offsets often fail on lofts with corners):
+        an inner loft through the sections offset inward by `th`, cut from the body. Section ends
+        that are listed as open faces are cut through; closed ends keep a wall of thickness `th`."""
+        occ = g.model.occ
+        secs = loft["sections"]
+        frames = []
+        for sec in secs:
+            fr = plane_frame(sec.get("plane", "XY"))
+            if sec.get("offset"):
+                o, ex, ey, ez = fr
+                fr = (o + ez * float(sec["offset"]), ex, ey, ez)
+            frames.append(fr)
+        occ.synchronize()
+        open_c = [np.asarray(occ.getCenterOfMass(2, t)) for t in open_faces]
+
+        def end_open(k):
+            poly = loop_polygon(secs[k]["loop"])
+            cc = frames[k][0] + poly.mean(0)[0] * frames[k][1] + poly.mean(0)[1] * frames[k][2]
+            return any(np.linalg.norm(cc - q) < 1e-3 * (1 + np.linalg.norm(cc)) + 1e-6 for q in open_c)
+        first, last = 0, len(secs) - 1
+        axis = frames[last][0] - frames[first][0]
+        L = float(np.linalg.norm(axis))
+        axis = axis / L if L > 0 else frames[0][3]
+        wires = []
+        loops = _loft_sections([_offset_loop(sec["loop"], th) for sec in secs])
+        for k, sec in enumerate(secs):
+            o, ex, ey, ez = frames[k]
+            shift = 0.0
+            if k == first:
+                shift = -th * 0.5 if end_open(k) else th
+            elif k == last:
+                shift = th * 0.5 if end_open(k) else -th
+            fr = (o + axis * shift, ex, ey, ez)
+            wires.append(_Builder(g, fr).loop(loops[k]))
+        inner = _thru_sections(occ, wires, bool(loft.get("ruled", False)))
+        out, _ = occ.cut(vols, inner, removeObject=False, removeTool=True)
+        return [x for x in out if x[0] == 3]
+
+    def _faces_for(self, g, vols, spec):
+        """Faces of the target bodies selected by filters {"normal": v, "box": [...], "type": T}
+        or by centre {"com": [x, y, z]} (closest face)."""
+        faces = []
+        for v in vols:
+            faces += [abs(sf) for _, sf in g.model.getBoundary([v], oriented=False, recursive=False)]
+        if not spec:
+            return []
+        specs = spec if isinstance(spec, list) else [spec]
+        out = []
+        for sp in specs:
+            if isinstance(sp, (int, float)):
+                out.append(int(sp))
+                continue
+            cands = []
+            for fc in faces:
+                c = np.asarray(g.model.occ.getCenterOfMass(2, fc))
+                if "com" in sp and "normal" not in sp and "box" not in sp:
+                    cands.append((float(np.linalg.norm(c - np.asarray(sp["com"], float))), fc))
+                    continue
+                ok = True
+                if "normal" in sp:
+                    try:
+                        pr = g.model.getParametrizationBounds(2, fc)
+                        nrm = np.asarray(g.model.getNormal(fc, [(pr[0][0] + pr[1][0]) / 2, (pr[0][1] + pr[1][1]) / 2]))
+                    except Exception:  # noqa: BLE001
+                        nrm = np.zeros(3)
+                    n = np.asarray(sp["normal"], float)
+                    ok &= float(nrm @ n) / max(np.linalg.norm(n), 1e-30) > 0.996
+                if "box" in sp:
+                    b = np.asarray(sp["box"], float)
+                    ok &= bool(np.all(c >= b[:3] - 1e-6) and np.all(c <= b[3:] + 1e-6))
+                if "type" in sp:
+                    ok &= g.model.getType(2, fc).lower() == str(sp["type"]).lower()
+                if ok:
+                    out.append(fc)
+            if cands:
+                out.append(min(cands)[1])
+        out = sorted(set(out))
+        if spec and not out:
+            raise GeometryError(f"no face matches {spec}")
+        return out
 
     def _edges_for(self, g, vols, spec):
         edges = set()
@@ -462,6 +928,8 @@ class CadModel:
         edges = sorted(edges)
         if spec == "all":
             return edges
+        if isinstance(spec, dict) and not ("com" in spec or "id" in spec):
+            return self._edge_filter(g, edges, spec)
         sigs = spec if isinstance(spec, list) else [spec]
         cand = [(e, entity_signature(g, 1, e)) for e in edges]
         out = []
@@ -470,9 +938,65 @@ class CadModel:
                 if int(s) in edges:
                     out.append(int(s))
                 continue
+            if isinstance(s, dict) and not ("com" in s or "id" in s):
+                out += [e for e in self._edge_filter(g, edges, s) if e not in out]
+                continue
+            if isinstance(s, dict) and "id" in s and "com" not in s:
+                if int(s["id"]) in edges:
+                    out.append(int(s["id"]))
+                continue
             best = match_one(s, cand)
-            if best is not None:
+            if best is not None and best not in out:
                 out.append(best)
+        return out
+
+    @staticmethod
+    def _edge_listing(g, vols, limit=40):
+        edges = set()
+        for v in vols:
+            for _, sf in g.model.getBoundary([v], oriented=False, recursive=False):
+                for _, e in g.model.getBoundary([(2, sf)], oriented=False, recursive=False):
+                    edges.add(abs(e))
+        out = []
+        for e in sorted(edges)[:limit]:
+            c = g.model.occ.getCenterOfMass(1, e)
+            out.append(f"{g.model.getType(1, e)} com=[{c[0]:.4g},{c[1]:.4g},{c[2]:.4g}] size={g.model.occ.getMass(1, e):.4g}")
+        more = f" ... and {len(edges) - limit} more" if len(edges) > limit else ""
+        return "; ".join(out) + more + (". Note: the com of a full circle edge is its centre" if out else "")
+
+    @staticmethod
+    def _edge_filter(g, edges, spec):
+        """Edge filter: {"parallel": "x"|"y"|"z"|[vx,vy,vz], "box": [xmin,ymin,zmin,xmax,ymax,zmax],
+        "type": "Line"|"Circle"|..., "min_length": L, "max_length": L}  (all given criteria must hold)."""
+        out = []
+        par = spec.get("parallel")
+        if isinstance(par, str):
+            par = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[par.lower()]
+        if par is not None:
+            par = np.asarray(par, float) / np.linalg.norm(par)
+        box = spec.get("box")
+        for e in edges:
+            if spec.get("type") and g.model.getType(1, e).lower() != str(spec["type"]).lower():
+                continue
+            bb = np.asarray(g.model.getBoundingBox(1, e))
+            if box is not None:
+                b = np.asarray(box, float)
+                if np.any(bb[:3] < b[:3] - 1e-6) or np.any(bb[3:] > b[3:] + 1e-6):
+                    continue
+            L = g.model.occ.getMass(1, e)
+            if spec.get("min_length") is not None and L < float(spec["min_length"]):
+                continue
+            if spec.get("max_length") is not None and L > float(spec["max_length"]):
+                continue
+            if par is not None:
+                ends = [abs(t) for _, t in g.model.getBoundary([(1, e)], oriented=False)]
+                if len(ends) != 2:
+                    continue
+                d = np.subtract(g.model.getValue(0, ends[1], []), g.model.getValue(0, ends[0], []))
+                n = np.linalg.norm(d)
+                if n < 1e-12 or abs(abs(d @ par) / n - 1) > 1e-6 or g.model.getType(1, e) != "Line":
+                    continue
+            out.append(e)
         return out
 
     def _import(self, g, f):
@@ -518,9 +1042,13 @@ class CadModel:
         occ_ok = not self.stl_mode
         bbmin, bbmax = np.full(3, np.inf), np.full(3, -np.inf)
         for dim, tag in g.model.getEntities(3):
-            vol = g.model.occ.getMass(3, tag) if occ_ok else 0.0
+            try:
+                bb = g.model.getBoundingBox(3, tag)
+                vol = g.model.occ.getMass(3, tag) if occ_ok else 0.0
+            except Exception:  # noqa: BLE001      # degenerate leftover of a failed operation
+                self.messages.append(f"skipped an invalid (empty) volume {tag}")
+                continue
             com = list(g.model.occ.getCenterOfMass(3, tag)) if occ_ok else [0, 0, 0]
-            bb = g.model.getBoundingBox(3, tag)
             bbmin, bbmax = np.minimum(bbmin, bb[:3]), np.maximum(bbmax, bb[3:])
             faces = [abs(s) for _, s in g.model.getBoundary([(3, tag)], oriented=False)]
             info["bodies"].append(dict(id=tag, volume=vol, com=com, bbox=list(bb), faces=faces,
@@ -561,7 +1089,8 @@ class CadModel:
                 face_edges.add(abs(e))
         line_owned = {t for (d, t) in getattr(self, "_owner", {}) if d == 1}
         for e in info["edges"]:
-            if e["id"] not in face_edges or e["id"] in line_owned:
+            # seam edges of periodic faces are missing from getBoundary: use upward adjacency too
+            if (e["id"] not in face_edges and not e["faces"]) or e["id"] in line_owned:
                 e["free"] = True
                 info.setdefault("lines", []).append(dict(id=e["id"], length=e["length"], com=e["com"], sig=e["sig"],
                                                          feature=getattr(self, "_owner", {}).get((1, e["id"]))))
@@ -596,24 +1125,32 @@ class CadModel:
                 except Exception as e:  # noqa: BLE001
                     self.messages.append(f"display tessellation incomplete: {e}")
             faces, edges = [], []
+            # global node table: triangles of a face may use nodes that getNodes(face,
+            # includeBoundary=True) does not return (degenerate edges, e.g. on a revolve axis)
+            try:
+                all_t, all_c, _ = g.model.mesh.getNodes()
+            except Exception:  # noqa: BLE001
+                all_t, all_c = np.zeros(0, np.int64), np.zeros(0)
+            all_t = np.asarray(all_t, np.int64)
+            all_c = np.asarray(all_c, float).reshape(-1, 3)
+            pos = np.full(int(all_t.max()) + 1 if len(all_t) else 1, -1, np.int64)
+            pos[all_t] = np.arange(len(all_t))
             for _, tag in g.model.getEntities(2):
                 try:
-                    nt, nc, _ = g.model.mesh.getNodes(2, tag, includeBoundary=True)
                     et, _, en = g.model.mesh.getElements(2, tag)
                 except Exception:  # noqa: BLE001
                     continue
-                if not len(nt):
-                    continue
-                loc = {int(n): i for i, n in enumerate(nt)}
-                tris = []
-                for t_, conn in zip(et, en):
-                    if t_ == 2:
-                        tris.append(np.asarray(conn, np.int64).reshape(-1, 3))
+                tris = [np.asarray(conn, np.int64).reshape(-1, 3) for t_, conn in zip(et, en) if t_ == 2]
                 if not tris:
                     continue
                 tris = np.concatenate(tris)
-                idx = np.vectorize(loc.get)(tris)
-                faces.append(dict(id=tag, xyz=np.asarray(nc, np.float32).reshape(-1, 3), tri=idx.astype(np.int32)))
+                if tris.max() >= len(pos) or np.any(pos[tris] < 0):
+                    tris = tris[np.all((tris < len(pos)) & (pos[np.minimum(tris, len(pos) - 1)] >= 0), axis=1)]
+                    if not len(tris):
+                        continue
+                used, inv = np.unique(tris, return_inverse=True)
+                faces.append(dict(id=tag, xyz=all_c[pos[used]].astype(np.float32),
+                                  tri=inv.reshape(-1, 3).astype(np.int32)))
             for _, tag in g.model.getEntities(1):
                 try:
                     nt, nc, par = g.model.mesh.getNodes(1, tag, includeBoundary=True)

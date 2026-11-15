@@ -160,6 +160,17 @@ class InpReader:
                 typ = str(p.get("TYPE", "ELEMENT")).upper()
                 rows = [(d[0].upper(), d[1].upper() if len(d) > 1 and d[1] else "") for d in data]
                 tgt.surfaces[name] = (typ, rows)
+            elif kw == "SPRING":
+                rows = [d for d in data if any(x for x in d)]
+                dofs = [int(_f(x)) for x in rows[0] if x] if len(rows) > 1 else []
+                k = _f(rows[-1][0])
+                kv = None
+                if dofs:
+                    kv = [0.0, 0.0, 0.0]
+                    kv[min(dofs[0], 3) - 1] = k
+                tgt.sections.append((p["ELSET"].upper(), "", dict(kind="spring", k=k, kvec=kv)))
+            elif kw == "MASS":
+                tgt.sections.append((p["ELSET"].upper(), "", dict(kind="mass", mass=_f(data[0][0]))))
             elif kw == "SOLID SECTION":
                 tgt.sections.append((p["ELSET"].upper(), p["MATERIAL"].upper()))
             elif kw == "SHELL SECTION":
@@ -660,7 +671,7 @@ def write_inp(spec, path):
         L.append(f"*ELSET, ELSET={_safe(k)}\n{_fmt_rows(eids[np.asarray(v, np.int64)])}")
     for k, s in spec.surfaces.items():
         if "elems" in s:
-            L.append(f"*SURFACE, NAME={_safe(k)}, TYPE=ELEMENT")
+            body = []
             el, fc = np.asarray(s["elems"]), np.asarray(s["faces"])
             types_ = spec.element_table()[0]
             shell = np.array([types_[e] in STRUCT_ELEMENTS for e in el], bool)
@@ -669,8 +680,9 @@ def write_inp(spec, path):
                     sel = (fc == f) & (shell == isshell)
                     lab = ("SPOS" if f == 0 else "SNEG") if isshell else f"S{f + 1}"
                     name = f"_{_safe(k)}_{lab}"
-                    L.insert(len(L) - 1, f"*ELSET, ELSET={name}\n{_fmt_rows(eids[el[sel]])}")
-                    L.append(f"{name}, {lab}")
+                    L.append(f"*ELSET, ELSET={name}\n{_fmt_rows(eids[el[sel]])}")
+                    body.append(f"{name}, {lab}")
+            L.append(f"*SURFACE, NAME={_safe(k)}, TYPE=ELEMENT\n" + "\n".join(body))
         else:
             L.append(f"*NSET, NSET=_{_safe(k)}_N\n{_fmt_rows(nid[np.asarray(s['nodes'])])}")
             L.append(f"*SURFACE, NAME={_safe(k)}, TYPE=NODE\n_{_safe(k)}_N, 1.0")

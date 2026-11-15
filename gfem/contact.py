@@ -110,56 +110,105 @@ class PenaltyContact:
         self.k = k
         self.lam = np.zeros(len(self.slave))
         self.mu, self.ftkn = float(mu), float(ftkn)
+        self.ncand = 8
         self.t_old = np.zeros((len(self.slave), 3))
         self.u_start = None
         self.augmented = augmented
         self.ns = len(self.slave)
-        self.last = None
+
+    # ------------------------------------------------------------------ search
+    def _search(self, x):
+        """Host k-d tree: k candidate master triangles per slave (only when nodes moved)."""
+        from scipy.spatial import cKDTree
+        cen = x[self.tris].mean(1)
+        k = min(self.ncand, len(self.tris))
+        _, cand = cKDTree(cen).query(x[self.slave], k=k)
+        cand = np.asarray(cand).reshape(len(self.slave), k)
+        self._cand = jnp.asarray(self.tris[cand])                 # (ns, k, 3) node ids
+        self._x_search = x.copy()
+        self.searches = getattr(self, "searches", 0) + 1
 
     def params(self, X, u):
         X = np.asarray(X)
         x = X + np.asarray(u).reshape(-1, 3)
-        t, w, d = project_to_triangles(x[self.slave], x, self.tris)
-        tri = self.tris[t]
-        xs = x[self.slave]
-        A, B, C = x[tri[:, 0]], x[tri[:, 1]], x[tri[:, 2]]
-        n = np.cross(B - A, C - A)
-        n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-300)
-        g = np.einsum("ij,ij->i", xs - A, n)
-        # inside the projected triangle footprint (small tolerance) and not too deep
-        Q = w[:, :1] * A + w[:, 1:2] * B + w[:, 2:] * C
-        lateral = np.linalg.norm((xs - Q) - g[:, None] * n, axis=1)
-        active = ((lateral < 0.05 * self.h) & (g > -self.depth)).astype(float)
-        nodes = np.concatenate([self.slave[:, None], tri], 1)
-        self.last = dict(gap=g, active=active)
-        p = dict(nodes=jnp.asarray(nodes), active=jnp.asarray(active),
-                 lam=jnp.asarray(self.lam), k=jnp.asarray(self.k))
+        moved = np.inf if getattr(self, "_x_search", None) is None else \
+            float(np.abs(x[self.slave] - self._x_search[self.slave]).max())
+        if moved > 0.25 * self.h:                                 # re-search only after real motion
+            self._search(x)
+        p = dict(slave=jnp.asarray(self.slave), cand=self._cand, lam=jnp.asarray(self.lam),
+                 k=jnp.asarray(self.k), h=jnp.asarray(self.h), depth=jnp.asarray(self.depth))
         if self.mu > 0:
             if self.u_start is None:
                 self.u_start = np.asarray(u).copy()
-            x0 = (X + self.u_start.reshape(-1, 3))[nodes]
-            p.update(x0=jnp.asarray(x0), t_old=jnp.asarray(self.t_old), mu=jnp.asarray(self.mu),
-                     kt=jnp.asarray(self.k * self.ftkn), nonsym=jnp.asarray(float(getattr(self, "nonsym", 0.0))))
+            p.update(x0all=jnp.asarray(X + self.u_start.reshape(-1, 3)), t_old=jnp.asarray(self.t_old),
+                     mu=jnp.asarray(self.mu), kt=jnp.asarray(self.k * self.ftkn),
+                     nonsym=jnp.asarray(float(getattr(self, "nonsym", 0.0))))
         self._last_p = p
+        self._last_X, self._last_u = X, u
         return p
+
+    @staticmethod
+    def select(X, u, p):
+        """Device: pick the closest of the candidate triangles, gap and active flag."""
+        x = X + u.reshape(-1, 3)
+        xs = x[p["slave"]]                                        # (ns, 3)
+        T = x[p["cand"]]                                          # (ns, k, 3, 3)
+        A, B, C = T[:, :, 0], T[:, :, 1], T[:, :, 2]
+        ab, ac, ap = B - A, C - A, xs[:, None] - A
+        d00, d01, d11 = (ab * ab).sum(-1), (ab * ac).sum(-1), (ac * ac).sum(-1)
+        d20, d21 = (ap * ab).sum(-1), (ap * ac).sum(-1)
+        den = jnp.maximum(d00 * d11 - d01 * d01, 1e-300)
+        v = jnp.clip((d11 * d20 - d01 * d21) / den, 0, 1)
+        w = jnp.clip((d00 * d21 - d01 * d20) / den, 0, 1)
+        sw = v + w
+        v, w = jnp.where(sw > 1, v / sw, v), jnp.where(sw > 1, w / sw, w)
+        Q = A + v[..., None] * ab + w[..., None] * ac
+        dist = jnp.linalg.norm(xs[:, None] - Q, axis=-1)
+        j = jnp.argmin(dist, axis=1)
+        ii = jnp.arange(xs.shape[0])
+        tri = p["cand"][ii, j]                                    # (ns, 3)
+        Ab, Bb, Cb, Qb = A[ii, j], B[ii, j], C[ii, j], Q[ii, j]
+        n = jnp.cross(Bb - Ab, Cb - Ab)
+        n = n / jnp.maximum(jnp.linalg.norm(n, axis=1, keepdims=True), 1e-300)
+        g = ((xs - Ab) * n).sum(-1)
+        lateral = jnp.linalg.norm((xs - Qb) - g[:, None] * n, axis=1)
+        active = ((lateral < 0.05 * p["h"]) & (g > -p["depth"])).astype(x.dtype)
+        nodes = jnp.concatenate([p["slave"][:, None], tri], 1)
+        return nodes, active, g
+
+    def _host_state(self):
+        if not hasattr(self, "_jsel"):
+            self._jsel = jax.jit(self.select)
+        nodes, active, g = self._jsel(jnp.asarray(self._last_X), jnp.asarray(self._last_u), self._last_p)
+        return nodes, np.asarray(active), np.asarray(g)
+
+    @property
+    def last(self):
+        if getattr(self, "_last_p", None) is None:
+            return None
+        _, a, g = self._host_state()
+        return dict(gap=g, active=a)
 
     def commit(self, X, u):
         """Accept the increment: store the tangential traction (stick/slip history)."""
         if self.mu > 0 and getattr(self, "_last_p", None) is not None:
             p = self.params(X, u)
-            x = (jnp.asarray(X) + jnp.asarray(u).reshape(-1, 3))[p["nodes"]]
-            self.t_old = np.asarray(_fric_t(x, p["x0"], p["k"], p["kt"], p["lam"], p["active"], p["t_old"], p["mu"]))
+            Xj, uj = jnp.asarray(X), jnp.asarray(u)
+            nodes, active, _ = self.select(Xj, uj, p)
+            x = (Xj + uj.reshape(-1, 3))[nodes]
+            self.t_old = np.asarray(_fric_t(x, p["x0all"][nodes], p["k"], p["kt"], p["lam"], active, p["t_old"], p["mu"]))
             self.u_start = np.asarray(u).copy()
 
     @staticmethod
     def evaluate(X, u, p, ndof):
-        x = (X + u.reshape(-1, 3))[p["nodes"]]
+        nodes, active, _ = PenaltyContact.select(X, u, p)
+        x = (X + u.reshape(-1, 3))[nodes]
         if "mu" in p:
-            f, K = _fric_pairs(x, p["x0"], p["k"], p["kt"], p["lam"], p["active"], p["t_old"], p["mu"], p["nonsym"])
+            f, K = _fric_pairs(x, p["x0all"][nodes], p["k"], p["kt"], p["lam"], active, p["t_old"], p["mu"], p["nonsym"])
         else:
-            f, K = _pairs(x, p["k"], p["lam"], p["active"])
-        fg = jnp.zeros((ndof // 3, 3)).at[p["nodes"]].add(f).reshape(-1)
-        dofs = (p["nodes"][:, :, None] * 3 + jnp.arange(3)).reshape(-1, 12)
+            f, K = _pairs(x, p["k"], p["lam"], active)
+        fg = jnp.zeros((ndof // 3, 3)).at[nodes].add(f).reshape(-1)
+        dofs = (nodes[:, :, None] * 3 + jnp.arange(3)).reshape(-1, 12)
         return fg, (dofs, K)
 
     def augment(self, pen_tol=0.03):

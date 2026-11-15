@@ -6,6 +6,13 @@
   gfem mesh part.step -o part.inp [--size 5] [--order 2]
   gfem bench [n ...]                   kernel throughput (CPU/GPU)
   gfem info                            devices / versions
+  gfem ai "describe the part" [-o part.step|part.gfem.json|features.json] [--attach drawing.png]
+          [--provider anthropic|openai|compatible] [--model M] [--modify project.gfem.json]
+  gfem ai "..." --simulate -o study.gfem.json   geometry + materials + loads + solve + check
+  gfem ai --login claude-cli|codex-cli  sign in with your Claude / ChatGPT account
+  gfem ai --status                     sign-in / API key status
+  gfem mcp [--project p.gfem.json]     gfem tools as an MCP server; --register claude|codex adds them
+  gfem ai --set-key anthropic|openai    store an API key in ~/.gfem/ai.json (0600)
 """
 import argparse
 import sys
@@ -13,6 +20,8 @@ import sys
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if (not argv or argv[0] != "ai") and ("#" in argv or any(a.startswith("#") for a in argv)):   # a pasted README comment (cmd/PowerShell)
+        argv = argv[:next(i for i, a in enumerate(argv) if a.startswith("#"))]
     if argv and argv[0].lower().endswith((".inp", ".bdf", ".nas", ".dat", ".cdb")):
         argv = ["run"] + argv                     # backwards compatible: python -m gfem job.inp
     p = argparse.ArgumentParser(prog="gfem", description="GPU nonlinear FEM")
@@ -39,6 +48,32 @@ def main(argv=None):
     b = sub.add_parser("bench", help="kernel throughput benchmark")
     b.add_argument("n", nargs="*", type=int)
     sub.add_parser("info", help="show devices and versions")
+    mc = sub.add_parser("mcp", help="gfem CAD/simulation tools as an MCP server (for Claude Code, Codex, ...)")
+    mc.add_argument("--project", help="enable the simulation tools on this .gfem.json project")
+    mc.add_argument("--run-dir", help="also write every build/result to this directory")
+    mc.add_argument("--register", choices=["claude", "codex"], help="register gfem permanently in Claude Code / Codex and exit")
+    ai = sub.add_parser("ai", help="text-to-CAD: an LLM (Claude / GPT) builds the part you describe")
+    ai.add_argument("prompt", nargs="*", help="description of the part (or of the change with --modify)")
+    ai.add_argument("-o", "--out", help="output: .step/.stp/.iges/.brep/.stl (CAD), .gfem.json (project), .json (features)")
+    ai.add_argument("--attach", action="append", default=[], help="drawing/photo (png/jpg/webp/gif), PDF, DXF, STEP or text")
+    ai.add_argument("--provider", choices=["claude-cli", "codex-cli", "anthropic", "openai", "compatible"],
+                    help="claude-cli / codex-cli: your signed-in Claude or ChatGPT account (default); "
+                         "anthropic / openai / compatible: API key or local server")
+    ai.add_argument("--simulate", action="store_true",
+                    help="also set up, solve and check the analysis (materials, supports, loads, mesh)")
+    ai.add_argument("--login", metavar="PROVIDER", choices=["claude-cli", "codex-cli"],
+                    help="sign in with your Claude (claude-cli) or ChatGPT (codex-cli) account and exit")
+    ai.add_argument("--status", action="store_true", help="show the AI sign-in / key status and exit")
+    ai.add_argument("--model")
+    ai.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    ai.add_argument("--base-url", help="OpenAI-compatible server URL (e.g. http://localhost:11434/v1)")
+    ai.add_argument("--modify", help="project (.gfem.json) or features (.json) to modify")
+    ai.add_argument("--units", default=None, choices=["mm", "m", "cm", "in"])
+    ai.add_argument("--max-turns", type=int)
+    ai.add_argument("--no-visual", action="store_true", help="do not send rendered views back to the model")
+    ai.add_argument("--preview", help="write the 4-view preview PNG here")
+    ai.add_argument("--set-key", metavar="PROVIDER", choices=["anthropic", "openai", "compatible"],
+                    help="store an API key (read from stdin / prompt) and exit")
     a = p.parse_args(argv)
     if a.cmd == "run":
         from . import run_file
@@ -76,8 +111,127 @@ def main(argv=None):
             print("CAD kernel: gmsh/OpenCASCADE available")
         except Exception:  # noqa: BLE001
             print("CAD kernel: gmsh not installed (pip install gmsh)")
+    elif a.cmd == "ai":
+        return _ai(a)
+    elif a.cmd == "mcp":
+        return _mcp(a)
     else:
         p.print_help()
+
+
+def _mcp(a):
+    import os
+    import subprocess
+    if a.register:
+        from .cad import ai_cli
+        prov = "claude-cli" if a.register == "claude" else "codex-cli"
+        c = ai_cli.cmd(prov)
+        if not c:
+            print(f"not installed: {ai_cli.status(prov)['install']}")
+            return 1
+        server = [sys.executable, "-m", "gfem.cad.mcp_server"] + (["--project", os.path.abspath(a.project)] if a.project else [])
+        argv = c + (["mcp", "add", "--scope", "user", "gfem", "--"] if a.register == "claude" else ["mcp", "add", "gfem", "--"]) + server
+        rc = subprocess.call(argv)
+        print("registered: ask Claude/Codex to 'build a ... with the gfem tools'" if rc == 0 else "registration failed")
+        return rc
+    from .cad.mcp_server import main as mcp_main
+    args = (["--project", a.project] if a.project else []) + (["--run-dir", a.run_dir] if a.run_dir else [])
+    return mcp_main(args)
+
+
+def _ai(a):
+    import getpass
+    import json
+    import os
+    from .cad import ai as AI
+    if a.status:
+        from .cad import ai_cli
+        for k in ai_cli.CLIS:
+            st = ai_cli.status(k)
+            state = "signed in" if st["logged_in"] else ("not signed in" if st["installed"] else f"not installed ({st['install']})")
+            print(f"{k:11s} {st['label']}: {state}" + (f"  [{st['version']}]" if st.get("version") else ""))
+        pub = AI.public_settings()
+        for k, v in pub["providers"].items():
+            print(f"{k:11s} {v['label']}: " + ("key available (" + v["key_source"] + ")" if v["has_key"] else "no key"))
+        print(f"default provider: {pub['provider']}")
+        return 0
+    if a.login:
+        from .cad import ai_cli
+        x = ai_cli.exe(a.login)
+        if not x:
+            print(f"not installed: {ai_cli.status(a.login)['install']}")
+            return 1
+        import subprocess
+        rc = subprocess.call([x, "auth", "login"] if a.login == "claude-cli" else [x, "login"])
+        st = ai_cli.status(a.login)
+        print("signed in" if st["logged_in"] else "sign-in did not complete")
+        if st["logged_in"]:
+            AI.save_settings(provider=a.login)
+        return 0 if st["logged_in"] else (rc or 1)
+    if a.set_key:
+        key = sys.stdin.readline().strip() if not sys.stdin.isatty() else getpass.getpass(f"{a.set_key} API key: ")
+        AI.save_settings(keys={a.set_key: key})
+        print(f"{'saved' if key else 'removed'} {a.set_key} key in {AI.settings_path()}")
+        return 0
+    prompt = " ".join(a.prompt).strip()
+    if not prompt:
+        print("describe the part, e.g.  gfem ai \"flange d120 with 6 bolt holes d10 on a d95 circle\" -o flange.step")
+        return 2
+    base, units, project = None, a.units or "mm", None
+    if a.modify:
+        with open(a.modify, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            base = d
+        elif "features" in d and "geometry" not in d:
+            base, units = d["features"], a.units or d.get("units", units)
+        else:
+            project = d
+            base, units = d["geometry"]["features"], a.units or d.get("units", units)
+    sim_project = None
+    if a.simulate:
+        from . import project as P
+        sim_project = project or P.new_project(units)
+        if base and not project:
+            sim_project["geometry"]["features"] = base
+        base = None
+    res = AI.generate(prompt, provider=a.provider, model=a.model, base_url=a.base_url, effort=a.effort,
+                      attachments=a.attach, base_features=base, units=units, max_turns=a.max_turns,
+                      visual=False if a.no_visual else None, log=print, project=sim_project)
+    if res.get("usage"):
+        u = res["usage"]
+        print(f"tokens: {u['input']} in (+{u.get('cache_read', 0)} cached), {u['output']} out; {res['seconds']} s, {res['builds']} build(s)")
+    if not res["ok"]:
+        print("ERROR:", res.get("error"))
+        return 1
+    if res.get("summary"):
+        print("\n" + res["summary"])
+    if a.preview and res.get("png"):
+        with open(a.preview, "wb") as f:
+            f.write(res["png"])
+    out = a.out or ((res.get("name") or "ai_part").strip().replace(" ", "_") + ".gfem.json")
+    ext = out.lower()
+    if res.get("solve_summary"):
+        print("result:", json.dumps(res["solve_summary"]))
+    if ext.endswith(".gfem.json") and res.get("project"):
+        from . import project as P
+        P.save(res["project"], out)
+    elif ext.endswith(".gfem.json"):
+        from . import project as P
+        pr = project or P.new_project(res["units"])
+        pr["geometry"]["features"] = res["features"]
+        pr["name"] = pr.get("name") if project else (res.get("name") or "AI part")
+        P.save(pr, out)
+    elif ext.endswith(".json"):
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(dict(name=res.get("name"), units=res["units"], features=res["features"]), f, indent=1)
+    else:
+        from .cad import CadModel
+        cad = CadModel(res["features"], units=res["units"])
+        cad.regenerate()
+        cad.export(out)
+    print(f"wrote {os.path.abspath(out)}")
+    return 0
 
 
 def _run(a):
@@ -90,4 +244,4 @@ def _run(a):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

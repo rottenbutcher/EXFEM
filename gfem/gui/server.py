@@ -91,6 +91,9 @@ class Session:
         self.stop_flag = threading.Event()
         self.status = "idle"
         self.result_project = None
+        self.ai_job = None
+        self.ai_stop = threading.Event()
+        self.ai_login = None
 
     # ---------------------------------------------------------- events
     def emit(self, kind, **data):
@@ -130,18 +133,27 @@ class Session:
         from ..cad.geometry import match
         old = self.project.get("bodies", {})
         new = {}
-        refs = [(k, v) for k, v in old.items() if v.get("sig") and k.isdigit()]
-        cand_ids = [b["id"] for b in self.info["bodies"]]
-        for k, v in refs:
-            ids, _ = match(self.info, 3, [dict(id=int(k), sig=v["sig"])])
+        refs = [(k, v) for k, v in old.items() if k.isdigit()]
+        cur = {b["id"]: b for b in self.info["bodies"]}
+        unmatched = []
+        for k, v in refs:                                  # 1) geometric signature
+            ids = match(self.info, 3, [dict(id=int(k), sig=v["sig"])])[0] if v.get("sig") else []
             if ids and str(ids[0]) not in new:
-                nv = dict(v)
-                nv["sig"] = next(b["sig"] for b in self.info["bodies"] if b["id"] == ids[0])
-                new[str(ids[0])] = nv
+                new[str(ids[0])] = dict(v, sig=cur[ids[0]]["sig"], feature=cur[ids[0]].get("feature"))
+            else:
+                unmatched.append((k, v))
+        free = [b for b in self.info["bodies"] if str(b["id"]) not in new]
+        for k, v in unmatched:                             # 2) same creating feature (dimension edits)
+            hit = next((b for b in free if v.get("feature") and b.get("feature") == v["feature"]), None)
+            if hit is None and int(k) in cur and cur[int(k)] in free:   # 3) same body id
+                hit = cur[int(k)]
+            if hit is not None:
+                free.remove(hit)
+                new[str(hit["id"])] = dict(v, sig=hit["sig"], feature=hit.get("feature"))
         mat0 = self.project["materials"][0]["id"] if self.project["materials"] else None
         for i, b in enumerate(self.info["bodies"]):
             if str(b["id"]) not in new:
-                new[str(b["id"])] = dict(name=f"Body {b['id']}", material=mat0, sig=b["sig"])
+                new[str(b["id"])] = dict(name=f"Body {b['id']}", material=mat0, sig=b["sig"], feature=b.get("feature"))
         # sheet (shell) and line (beam) bodies keep their section data by signature
         diag = self.info.get("diag", 1.0)
         for pre, key, dim, defaults in (("S", "sheets", 2, dict(thickness=max(diag / 100, 1e-3))),
@@ -387,6 +399,90 @@ class Session:
                     lines=b64(d.get("lines", np.zeros((0, 2))), np.int32),
                     line_edge=b64(d.get("line_edge", np.zeros(0)), np.int32))
 
+    # ---------------------------------------------------------- AI CAD
+    def ai_generate(self, body):
+        """Run the text-to-CAD agent in a background thread; progress as 'ai' events."""
+        from ..cad import ai as AI
+        if self.ai_job is not None and self.ai_job.is_alive():
+            raise P.ProjectError("an AI request is already running")
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            raise P.ProjectError("describe the part first")
+        atts = []
+        for path in body.get("attachments") or []:
+            path = os.path.abspath(path)
+            if not path.startswith(os.path.join(self.workdir, "uploads")):
+                raise P.ProjectError("attachments must be uploaded through the GUI")
+            atts.append(AI.load_attachment(path))
+        mode = body.get("mode")
+        base = body.get("base_features") if mode == "modify" else None
+        sim_project = None
+        if mode == "simulate":
+            sim_project = copy.deepcopy(body.get("project") or self.project)
+        units = self.project.get("units", "mm")
+        self.ai_stop.clear()
+        rid = int(time.time() * 1000)
+
+        def ev(step, **kw):
+            self.emit("ai", step=step, rid=rid, **kw)
+
+        def on_build(rep):
+            ev("build", ok=rep["ok"], errors=rep["errors"][:5], warnings=rep["warnings"][:5],
+               size=rep.get("size"), volume=rep.get("volume"), bodies=len(rep.get("bodies") or []),
+               png=base64.b64encode(rep["png"]).decode() if rep.get("png") else None,
+               features=rep["features"] if rep["ok"] else None, name=rep.get("name"))
+
+        run_dir = os.path.join(self.workdir, "ai_runs", str(rid))
+
+        def on_sim(d):
+            png = d.get("png")
+            pf = (d.get("result") or {}).get("png_file") if isinstance(d.get("result"), dict) else None
+            if png is None and pf:
+                try:
+                    with open(os.path.join(run_dir, pf), "rb") as f:
+                        png = f.read()
+                except OSError:
+                    png = None
+            ev("sim", tool=d.get("tool"), error=d.get("error"),
+               png=base64.b64encode(png).decode() if png else None)
+
+        def run():
+            try:
+                ev("start", prompt=prompt)
+                res = AI.generate(prompt, provider=body.get("provider") or None, model=body.get("model") or None,
+                                  run_dir=run_dir, on_sim=on_sim,
+                                  effort=body.get("effort") or None, base_url=body.get("base_url") or None,
+                                  attachments=atts, base_features=base, units=units,
+                                  max_turns=body.get("max_turns") or None, visual=body.get("visual"),
+                                  log=lambda m: ev("log", msg=m), on_build=on_build,
+                                  should_stop=self.ai_stop.is_set, project=sim_project,
+                                  session=body.get("session") or None)
+                ev("done", ok=res["ok"], error=res.get("error"), features=res["features"], name=res.get("name"),
+                   units=res.get("units"), summary=res.get("summary"), usage=res.get("usage"),
+                   seconds=res.get("seconds"), builds=res.get("builds"), project=res.get("project"),
+                   solve_summary=res.get("solve_summary"), session=res.get("session"),
+                   png=base64.b64encode(res["png"]).decode() if res.get("png") else None)
+            except Exception as e:  # noqa: BLE001
+                ev("done", ok=False, error=str(e))
+                if not isinstance(e, AI.AIError):
+                    traceback.print_exc()
+        self.ai_job = threading.Thread(target=run, daemon=True)
+        self.ai_job.start()
+        return rid
+
+    def ai_login_start(self, provider, device=False, console=False):
+        from ..cad import ai_cli
+        if self.ai_login is not None and self.ai_login.proc.poll() is None:
+            self.ai_login.cancel()
+
+        def on_line(line, url):
+            self.emit("ai", step="login", provider=provider, line=line, url=url)
+
+        def on_exit(ok):
+            self.emit("ai", step="login_done", provider=provider, ok=bool(ok), status=ai_cli.status(provider))
+        self.ai_login = ai_cli.Login(provider, on_line=on_line, on_exit=on_exit, device=device, console=console)
+        return True
+
     # ---------------------------------------------------------- solve
     def start(self, fn, name):
         if self.job is not None and self.job.is_alive():
@@ -416,6 +512,8 @@ class Session:
         sp = P.build_spec(p, self.mesh_spec, self.info, log=self.log)
         for w in sp.warnings:
             self.log(f"warning: {w}")
+        for w in setup_warnings(p):
+            self.log(f"warning: {w}")
         mon = GuiMonitor(self)
         out = os.path.join(self.workdir, "results")
         opts = dict(linear_solver=p["analysis"].get("linear_solver", "auto"),
@@ -442,7 +540,7 @@ class Session:
         out = []
         for i, f in enumerate(self.frames):
             d = dict(i=i, time=f.get("time"), step=f.get("step"), procedure=f.get("procedure"))
-            for k in ("freq", "mode", "eigenvalue", "lpf", "compliance"):
+            for k in ("freq", "mode", "eigenvalue", "lpf", "compliance", "label"):
                 if k in f:
                     d[k] = f[k]
             if "U" in f:
@@ -481,6 +579,28 @@ class Session:
         if rtype == "density" and "density" in fr:
             res["density_elem_min"] = float(np.min(fr["density"]))
         return res
+
+
+def setup_warnings(p):
+    """Plain-language checks of an analysis setup before solving."""
+    out = []
+    kind = p["analysis"]["type"]
+    active = [c for c in p.get("conditions", []) if not c.get("suppressed")]
+    supports = [c for c in active if P.CONDITIONS.get(c["type"], {}).get("group") == "support"]
+    loads = [c for c in active if P.CONDITIONS.get(c["type"], {}).get("group") == "load"]
+    if kind in ("static", "buckling", "nonlinear_buckling", "transient", "thermal_stress", "topopt", "harmonic") \
+            and not supports and not p.get("connections") and kind != "deck":
+        out.append("no supports: the model can move freely as a rigid body, so a static solve cannot converge. "
+                   "Add a Fixed Support (or displacement / frictionless supports) on at least one face.")
+    if kind in ("static", "buckling", "nonlinear_buckling", "topopt") and not loads and kind != "deck":
+        out.append("no loads: the result will be zero. Add a force, pressure, gravity or other load.")
+    if kind in ("thermal", "thermal_transient") and not any(c["type"] in ("temperature", "convection", "radiation") for c in active):
+        out.append("no temperature, convection or radiation boundary: the steady temperature is not defined.")
+    for c in active:
+        sc = c.get("scope")
+        if sc is not None and not sc.get("ids") and not sc.get("named") and not sc.get("set"):
+            out.append(f"{c.get('name', c['id'])} has no faces/bodies selected (empty scope).")
+    return out
 
 
 def _jsonable(x):
@@ -555,15 +675,35 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, [dict(key=k, title=v[0], text=v[1]) for k, v in EXAMPLES.items()])
             if u.path == "/api/system":
                 return self._send(200, _system())
+            if u.path == "/api/ai/settings":
+                from ..cad import ai as AI
+                return self._send(200, AI.public_settings())
+            if u.path == "/api/ai/cli_status":
+                from ..cad import ai_cli
+                names = [q["provider"]] if q.get("provider") in ai_cli.CLIS else list(ai_cli.CLIS)
+                return self._send(200, {n: ai_cli.status(n) for n in names})
             return self._send(404, {"error": "not found"})
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             return self._send(400, {"error": str(e)})
 
+    def _same_origin(self):
+        """Reject cross-site POSTs (a web page in another tab must not drive the local server,
+        spend the user's AI credits or read files). Browsers always send Origin on POST."""
+        origin = self.headers.get("Origin")
+        if origin is None:                    # scripts, curl, tests (not a browser cross-site request)
+            return self.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
+        return urllib.parse.urlparse(origin).netloc == self.headers.get("Host", "")
+
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
         s = self.session
+        if not self._same_origin():
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            if n:
+                self.rfile.read(n)
+            return self._send(403, {"error": "cross-origin request refused"})
         try:
             if u.path == "/api/upload":
                 name = os.path.basename(q.get("name", "upload.bin"))
@@ -636,6 +776,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, dict(path=path))
             if u.path == "/api/detect_contacts":
                 return self._send(200, dict(pairs=_detect_contacts(s, float(body.get("tol", 0)))))
+            if u.path == "/api/ai/settings":
+                from ..cad import ai as AI
+                keys = {body["provider"]: body["key"]} if body.get("provider") and "key" in body else None
+                AI.save_settings(keys=keys, **{k: body[k] for k in ("provider", "model", "effort", "base_url", "max_turns", "visual")
+                                              if k in body and k != "key"})
+                return self._send(200, AI.public_settings())
+            if u.path == "/api/ai/generate":
+                return self._send(200, dict(rid=s.ai_generate(body)))
+            if u.path == "/api/ai/login":
+                from ..cad import ai_cli
+                if body.get("provider") not in ai_cli.CLIS:
+                    raise P.ProjectError("unknown provider")
+                s.ai_login_start(body["provider"], device=bool(body.get("device")), console=bool(body.get("console")))
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/login_code":
+                if s.ai_login is None:
+                    raise P.ProjectError("no sign-in in progress")
+                s.ai_login.send(str(body.get("code", "")))
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/login_cancel":
+                if s.ai_login is not None:
+                    s.ai_login.cancel()
+                return self._send(200, dict(ok=True))
+            if u.path == "/api/ai/logout":
+                from ..cad import ai_cli
+                if body.get("provider") not in ai_cli.CLIS:
+                    raise P.ProjectError("unknown provider")
+                ai_cli.logout(body["provider"])
+                return self._send(200, ai_cli.status(body["provider"]))
+            if u.path == "/api/ai/stop":
+                s.ai_stop.set()
+                return self._send(200, dict(ok=True))
             if u.path == "/api/dxf":
                 from ..cad.geometry import dxf_loops
                 loops, sc = dxf_loops(body["path"])
@@ -847,6 +1019,14 @@ def serve(host="127.0.0.1", port=8765, workdir="gfem_work", open_browser=True):
     httpd.daemon_threads = True
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}/"
     print(f"gfem GUI running at {url}  (workdir {session.workdir}); Ctrl+C to quit")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        try:
+            from ..cad import ai as AI
+            if any(p["has_key"] for p in AI.public_settings()["providers"].values()):
+                print("warning: the GUI is reachable from the network and an AI API key is configured; "
+                      "anyone who can reach this port can run AI CAD requests on your account")
+        except Exception:  # noqa: BLE001
+            pass
     if open_browser:
         try:
             import webbrowser

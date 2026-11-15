@@ -119,6 +119,75 @@
     <div class="dlg-btns"><button id="sk-cancel">Cancel</button><button id="sk-ok" class="primary">OK – Generate</button></div>
   </div>
 </div>
+<div class="dlg" id="ai-dlg">
+  <div class="dlg-box ai">
+    <div class="dlg-title">AI CAD <span class="ai-sub">describe a part, attach a drawing &mdash; Claude or GPT builds it as an editable feature tree</span>
+      <button class="dlg-x" id="ai-close" title="Close">✕</button></div>
+    <div class="ai-body">
+      <div class="ai-left">
+        <div class="ai-account" id="ai-account">
+          <div class="ai-acc-row">
+            <div class="seg" id="ai-acc-seg">
+              <button data-p="claude-cli" title="Use your Claude account (Claude Code sign-in)">Claude account</button>
+              <button data-p="codex-cli" title="Use your ChatGPT account (OpenAI Codex sign-in)">ChatGPT account</button>
+              <button data-p="api" title="Use an API key or a local OpenAI-compatible server">API key</button>
+            </div>
+            <span id="ai-acc-status" class="ai-acc-status">…</span>
+            <span class="ai-acc-btns"><button id="ai-signin" class="primary">Sign in</button><button id="ai-signout">Sign out</button><button id="ai-recheck" title="Check the sign-in status again">⟳</button></span>
+            <label class="chk ai-dev" id="ai-device-lbl" title="Sign in with a one-time code on any device (use this when gfem runs on another computer)"><input type="checkbox" id="ai-device"> device code</label>
+          </div>
+          <div class="ai-login" id="ai-login">
+            <div id="ai-login-msg"></div>
+            <div class="ai-login-row"><a id="ai-login-link" target="_blank" rel="noopener">Open the sign-in page ↗</a></div>
+            <div class="ai-login-row" id="ai-code-row"><input id="ai-code" placeholder="If the page shows a code, paste it here" spellcheck="false" autocomplete="off"><button id="ai-code-send">Submit code</button><button id="ai-login-cancel">Cancel</button></div>
+          </div>
+        </div>
+        <div class="ai-mode">
+          <label class="chk"><input type="radio" name="ai-mode" value="new" checked> New part</label>
+          <label class="chk"><input type="radio" name="ai-mode" value="modify"> Modify current geometry</label>
+          <label class="chk" title="The model also assigns materials, supports and loads, meshes, solves and checks the results (signed-in account or API key)"><input type="radio" name="ai-mode" value="simulate"> Simulate (geometry + analysis)</label>
+        </div>
+        <textarea id="ai-prompt" spellcheck="false" placeholder="e.g. Flange: outer diameter 120 mm, thickness 15 mm, central hub d60 x 40 high with a d30 bore, 6 bolt holes d11 on a d95 circle, 2 mm fillets where the hub meets the flange."></textarea>
+        <div class="ai-chips" id="ai-chips"></div>
+        <div class="ai-att">
+          <label class="file-btn">Attach drawing / photo / PDF / DXF…<input id="ai-file" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.dxf,.step,.stp,.iges,.igs,.txt,.md"></label>
+          <div id="ai-att-list"></div>
+        </div>
+        <div class="ai-go">
+          <button id="ai-run" class="primary">✨ Generate</button>
+          <button id="ai-stop" disabled>Stop</button>
+          <span id="ai-status"></span>
+        </div>
+        <details class="ai-settings" id="ai-settings">
+          <summary>Model &amp; options</summary>
+          <div class="grid">
+            <label class="ai-apirow">Provider</label><select class="ai-apirow" id="ai-provider"></select>
+            <label>Model</label><input id="ai-model" list="ai-models" spellcheck="false"><datalist id="ai-models"></datalist>
+            <label>Effort</label><select id="ai-effort"></select>
+            <label class="ai-keyrow">API key</label><div class="row ai-keyrow"><input id="ai-key" type="password" autocomplete="off" placeholder=""><button id="ai-key-save">Save</button></div>
+            <label class="ai-burl">Base URL</label><input class="ai-burl" id="ai-base" placeholder="http://localhost:11434/v1" spellcheck="false">
+            <label class="ai-apirow">Max turns</label><input class="ai-apirow" id="ai-turns" type="number" min="1" max="30">
+            <label>Self-check</label><label class="chk"><input id="ai-visual" type="checkbox"> send rendered views back to the model</label>
+          </div>
+          <div class="ai-keyinfo" id="ai-keyinfo"></div>
+        </details>
+      </div>
+      <div class="ai-right">
+        <div class="ai-preview"><img id="ai-img" alt=""><div id="ai-img-msg">The model's builds appear here.</div>
+          <a id="ai-apply-build" title="Use this intermediate build as the model">apply this build</a></div>
+        <div class="ai-strip" id="ai-strip"></div>
+        <div class="ai-log" id="ai-log"></div>
+      </div>
+    </div>
+    <div class="dlg-btns">
+      <span id="ai-usage"></span>
+      <button id="ai-report" title="Download a Markdown report of the AI requests and results">Report</button>
+      <button id="ai-newchat" title="Forget the conversation: the next request starts fresh">New conversation</button>
+      <button id="ai-undo" disabled title="Restore the geometry from before the last AI change">Undo AI change</button>
+      <button id="ai-ok" class="primary">Close</button>
+    </div>
+  </div>
+</div>
 <input type="file" id="file-cad" accept=".step,.stp,.iges,.igs,.brep,.stl,.dxf" hidden>
 <input type="file" id="file-deck" accept=".inp,.bdf,.nas,.dat,.cdb,.msh,.unv,.med" hidden>
 <input type="file" id="file-proj" accept=".json" hidden>
