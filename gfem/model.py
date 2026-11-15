@@ -81,16 +81,32 @@ class Block:
             return fe, snew
 
         def stiff(Xe, ue, se, Te, scv):
+            # Material tangent A = dP/dF per point: 9 AD directions through the constitutive
+            # update instead of 3*nn directions through the whole element (the return mapping is
+            # the expensive part, so this is ~3*nn/9 times cheaper).
             nn = ue.shape[0]
-            if et.fbar:
-                K = jax.jacfwd(lambda u: force(Xe, u, se, Te, scv)[0])(ue)
-                return K.reshape(nn * 3, nn * 3)
-            # fast path: material tangent A = dP/dF per point (9 AD directions instead of 3*nn)
             sc, eig = scv[0], scv[1:10].reshape(3, 3)
             dNdX, vol = geom(Xe)
-            F = defgrad(Xe, ue, dNdX)
             Tg = N @ Te
-            A = jax.vmap(jax.jacfwd(lambda f, s, t, t0: stress_gp(f, s, t, t0, eig)[0]))(F, se, Tg[:, 0], Tg[:, 1])
+            stress_P = lambda f, s, t, t0: stress_gp(f, s, t, t0, eig)[0]
+            if et.fbar:
+                # F-bar / B-bar: F depends on all nodes. K = G^T A G (+ geometric part
+                # d(G^T P)/du at fixed P for the nonlinear finite-strain F-bar map); both use
+                # derivatives of the kinematics only, never of the material.
+                Fmap = lambda u: defgrad(Xe, u, dNdX)
+                F = Fmap(ue)
+                G = jax.jacfwd(Fmap)(ue)                       # (ngp, 3, 3, nn, 3)
+                A = jax.vmap(jax.jacfwd(stress_P))(F, se, Tg[:, 0], Tg[:, 1])
+                wv = sc * vol
+                K = jnp.einsum("gijak,gijlm,glmbn,g->akbn", G, A, G, wv)
+                if fs:
+                    P, _ = stress(F, se, Te, eig)
+                    Pw = P * wv[:, None, None]
+                    Kg = jax.jacfwd(lambda u: jax.vjp(Fmap, u)[1](Pw)[0])(ue)
+                    K = K + Kg
+                return K.reshape(nn * 3, nn * 3)
+            F = defgrad(Xe, ue, dNdX)
+            A = jax.vmap(jax.jacfwd(stress_P))(F, se, Tg[:, 0], Tg[:, 1])
             K = jnp.einsum("gaj,gijkl,gbl,g->aibk", dNdX, A, dNdX, sc * vol)
             return K.reshape(nn * 3, nn * 3)
 
@@ -407,7 +423,8 @@ class Model:
             return self._gather
         key = (self.nn, len(self.blocks))
         if getattr(self, "_gather_key", None) != key:
-            self._gather = gather_plan([np.asarray(b.conn) for b in self.blocks], self.nn)
+            with jax.ensure_compile_time_eval():     # a cached constant, never a tracer
+                self._gather = gather_plan([np.asarray(b.conn) for b in self.blocks], self.nn)
             self._gather_key = key
         return self._gather
 
@@ -417,7 +434,8 @@ class Model:
         key = (self.ndof, len(self.blocks))
         if getattr(self, "_csr_key", None) != key:
             tot = sum(b.ne * (b.dofs().shape[1] ** 2) for b in self.blocks)
-            self._csr = csr_pattern([b.dofs() for b in self.blocks], self.ndof) if tot < 4e8 else None
+            with jax.ensure_compile_time_eval():
+                self._csr = csr_pattern([b.dofs() for b in self.blocks], self.ndof) if tot < 4e8 else None
             self._csr_key = key
         return self._csr
 

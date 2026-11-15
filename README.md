@@ -402,9 +402,12 @@ Every CAD body, face, edge and vertex keeps its identity as a node/element set a
 | Host contact search every Newton iteration | k-d tree only after real nodal motion; closest-candidate selection, gap and active set on the device |
 | Explicit dynamics building per-step BC arrays on the host | prescribed motion evaluated on the device inside `lax.scan` |
 | FP64 throughput on GeForce/RTX | mixed FP32/FP64 solver |
+| Atomic `segment_sum` in every AMG level product (several per V-cycle, every CG iteration) | level matrices stored padded (ELL): pure gather + row sum; 2.35× faster AMG-PCG solve measured on CPU (311k dofs), same iterations |
+| F-bar / B-bar element tangent differentiated through the whole element (24 passes through the plasticity return map) | material tangent (9 directions) + kinematic derivative only; exact, about 1.35× faster tangent assembly |
+| Separate residual-norm pass in every CG iteration | residual norm fused into the update |
 | Factorisation memory in eigen analyses | LOBPCG (mat-vecs only) |
 
-`examples/gpu_showcase.py --n 60` runs a multi-million-dof static, 20-mode modal, buckling and
+`examples/benchmark.py 20 40` times the kernels and an AMG-PCG solve; `examples/gpu_showcase.py --n 60` runs a multi-million-dof static, 20-mode modal, buckling and
 256-load-case study and prints timings for a CPU/GPU comparison.
 
 ## Python API

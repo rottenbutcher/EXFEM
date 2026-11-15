@@ -25,37 +25,54 @@ def pcg(A, b, M=None, x0=None, tol=1e-8, maxiter=2000):
     z = M(r)
     p = z
     rz = jnp.vdot(r, z)
-    bn = jnp.maximum(jnp.linalg.norm(b), 1e-300)
+    bn2 = jnp.maximum(jnp.vdot(b, b), 1e-300)
+    tol2 = tol * tol * bn2
 
     def cond(c):
-        x, r, z, p, rz, k = c
-        return (jnp.linalg.norm(r) > tol * bn) & (k < maxiter)
+        return (c[6] > tol2) & (c[5] < maxiter)
 
     def body(c):
-        x, r, z, p, rz, k = c
+        x, r, z, p, rz, k, _ = c
         Ap = A(p)
         alpha = rz / jnp.vdot(p, Ap)
         x = x + alpha * p
         r = r - alpha * Ap
+        rr = jnp.vdot(r, r)                     # fused with the update (no extra pass for the test)
         z = M(r)
         rz_new = jnp.vdot(r, z)
         p = z + (rz_new / rz) * p
-        return x, r, z, p, rz_new, k + 1
+        return x, r, z, p, rz_new, k + 1, rr
 
-    x, r, z, p, rz, k = jax.lax.while_loop(cond, body, (x, r, z, p, rz, 0))
-    return x, k, jnp.linalg.norm(r) / bn
+    x, r, z, p, rz, k, rr = jax.lax.while_loop(cond, body, (x, r, z, p, rz, 0, jnp.vdot(r, r)))
+    return x, k, jnp.sqrt(rr / bn2)
 
 
 # ------------------------------------------------------------------ CSR helpers
-def csr_to_device(A):
+def csr_to_device(A, ell_max_ratio=2.0):
+    """Device sparse matrix. Rows of similar length are stored padded (ELL): the product is
+    then a pure gather + row sum - no atomic scatter-adds on the GPU and perfectly regular
+    memory access. Matrices with a few very long rows keep the CSR/segment-sum form."""
     A = A.tocsr()
     A.sort_indices()
-    rows = np.repeat(np.arange(A.shape[0]), np.diff(A.indptr))
+    cnt = np.diff(A.indptr)
+    n = A.shape[0]
+    w = int(cnt.max()) if n else 0
+    if n and w <= ell_max_ratio * max(cnt.mean(), 1.0):
+        pos = np.arange(A.nnz) - np.repeat(A.indptr[:-1], cnt)
+        rows = np.repeat(np.arange(n), cnt)
+        cols = np.zeros((n, w), np.int32)
+        data = np.zeros((n, w), A.data.dtype)
+        cols[rows, pos] = A.indices
+        data[rows, pos] = A.data
+        return dict(ell_data=jnp.asarray(data), ell_cols=jnp.asarray(cols), n=n)
+    rows = np.repeat(np.arange(n), cnt)
     return dict(data=jnp.asarray(A.data), cols=jnp.asarray(A.indices.astype(np.int32)),
-                rows=jnp.asarray(rows.astype(np.int32)), n=A.shape[0])
+                rows=jnp.asarray(rows.astype(np.int32)), n=n)
 
 
 def csr_mv(M, x, n):
+    if "ell_data" in M:                       # atomic-free gather + reduce
+        return jnp.sum(M["ell_data"] * x[M["ell_cols"]], axis=1)
     return jax.ops.segment_sum(M["data"] * x[M["cols"]], M["rows"], num_segments=n,
                                indices_are_sorted=True)
 
