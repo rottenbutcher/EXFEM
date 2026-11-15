@@ -1,4 +1,4 @@
-// gfem Mechanical – main controller: ribbon, outline tree, details pane, solve monitoring, results.
+// EXFEM Mechanical – main controller: ribbon, outline tree, details pane, solve monitoring, results.
 import { Viewer, b64f32 } from "./viewer.js";
 import { Chart, fmt, fmtR } from "./charts.js";
 import { openSketcher } from "./sketch.js";
@@ -52,7 +52,7 @@ class App {
     this.state = await api.get("/api/state");
     this.project = this.state.project;
     this.seq = this.state.seq;
-    $("#sys-info").textContent = `${this.state.system.backend.toUpperCase()} · ${this.state.system.devices.join(", ")} · gfem ${this.state.system.version}`;
+    $("#sys-info").textContent = `${this.state.system.backend.toUpperCase()} · ${this.state.system.devices.join(", ")} · EXFEM ${this.state.system.version}`;
     const ex = await api.get("/api/examples");
     $("#examples-menu").innerHTML = ex.map(e => `<a data-ex="${e.key}" title="${esc(e.text)}">${esc(e.title)}</a>`).join("");
     $$("#examples-menu a").forEach(a => a.onclick = () => this.loadExample(a.dataset.ex));
@@ -60,7 +60,7 @@ class App {
     if (this.project.geometry.features.length) await this.regenerate();
     this.render();
     this.listen();
-    this.log("Welcome to gfem Mechanical. Start from Geometry (create or import CAD), or open an Example.");
+    this.log("Welcome to EXFEM Mechanical. Start from Geometry (create or import CAD), or open an Example.");
   }
 
   listen() {

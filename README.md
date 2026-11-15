@@ -1,4 +1,4 @@
-<h1 align="center">gfem</h1>
+<h1 align="center">EXFEM</h1>
 
 <p align="center">
   <b>GPU-accelerated nonlinear finite element analysis with parametric CAD, a Mechanical-style
@@ -20,15 +20,15 @@
 [![JavaScript](https://img.shields.io/badge/JavaScript-ES%20modules-F7DF1E?logo=javascript&logoColor=black)](https://developer.mozilla.org/docs/Web/JavaScript)
 [![ParaView](https://img.shields.io/badge/ParaView-.vtu%20output-4A90D9)](https://www.paraview.org/)
 [![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
 
 <p align="center">
-  <img src="docs/img/static_bracket.png" alt="gfem Mechanical: static analysis of an L-bracket" width="100%">
+  <img src="docs/img/static_bracket.png" alt="EXFEM Mechanical: static analysis of an L-bracket" width="100%">
 </p>
 
-gfem is an open-source structural and thermal FE package written in Python on
+EXFEM is an open-source structural and thermal FE package written in Python on
 [JAX](https://github.com/jax-ml/jax). One code base runs on CPUs and on NVIDIA and AMD GPUs, from
 the element kernels to the Newton loop, contact, eigen-solvers and topology optimisation. It reads
 and writes Abaqus, Nastran and ANSYS decks, imports STEP/IGES/DXF, and comes with a browser GUI
@@ -56,6 +56,8 @@ laid out like ANSYS Mechanical, which can drive a solver on a remote GPU node.
 
 ## Quick start
 
+The Python package and command are named `gfem`.
+
 Install (CPU: JAX, SciPy, gmsh/OpenCASCADE, PyAMG, ezdxf, meshio):
 
 ```bash
@@ -72,7 +74,7 @@ pip install "jax[cuda12]"
 > silently falls back to an old CPU-only `jax` that does not match the installed `jaxlib`
 > ("jaxlib version ... is newer than and incompatible with jax"). On Windows either run CPU-only
 > (`pip install -U jax jaxlib`) or use the GPU inside WSL2 (Ubuntu): install the NVIDIA driver on
-> Windows, then run `pip install "jax[cuda12]"` and gfem inside WSL2. AMD `jax[rocm]` is Linux-only too.
+> Windows, then run `pip install "jax[cuda12]"` and EXFEM inside WSL2. AMD `jax[rocm]` is Linux-only too.
 
 Start the GUI, then open http://127.0.0.1:8765:
 
@@ -124,7 +126,7 @@ Ready-to-run GUI projects, CAD files, solver decks and scripts are in
 </p>
 
 Describe a part in plain language (any language) or attach a drawing (photo, screenshot, PDF, DXF).
-The model builds the part as a normal, editable gfem feature tree. In **Simulate** mode it also
+The model builds the part as a normal, editable EXFEM feature tree. In **Simulate** mode it also
 assigns materials, places supports and loads on the right faces, meshes, solves, reads the results
 and iterates until your requirement is met ("safety factor at least 2: make it thicker if not").
 Open it from **Home > AI CAD** or **Geometry > AI CAD**, or use `gfem ai` on the command line.
@@ -132,8 +134,8 @@ Open it from **Home > AI CAD** or **Geometry > AI CAD**, or use `gfem ai` on the
 **Sign in instead of an API key.** Pick **Claude account** or **ChatGPT account** and press
 **Sign in**. The official sign-in page of Claude Code or OpenAI Codex opens in your browser; after you
 sign in (paste the code if the page shows one), requests use your Claude Pro / Max / Team or ChatGPT
-Plus / Pro / Team plan. gfem runs the official CLI with gfem's CAD and simulation tools attached
-over MCP, with the CLI's own shell and file tools switched off, so the model can only work on your gfem
+Plus / Pro / Team plan. EXFEM runs the official CLI with EXFEM's CAD and simulation tools attached
+over MCP, with the CLI's own shell and file tools switched off, so the model can only work on your EXFEM
 model. You need the CLI once:
 
 ```bash
@@ -147,14 +149,14 @@ npm install -g @openai/codex
 API keys (Anthropic, OpenAI) and local OpenAI-compatible servers (Ollama, vLLM, LM Studio) work as
 well: choose **API key**.
 
-How it works. The model never writes free-form code; it calls gfem tools:
+How it works. The model never writes free-form code; it calls EXFEM tools:
 
-| Tool | What gfem does |
+| Tool | What EXFEM does |
 |---|---|
 | `build_cad` | static validation (numbers, self-intersecting sketches, profiles crossing a revolve axis, references to consumed bodies), OpenCASCADE regeneration, measurement (bodies, volume, bounding box), 4-view image. Features: box, cylinder, cone, sphere, torus, wedge, sketch extrude / revolve, loft, sweep (path, spline, helix), shell, hole (counterbore, countersink, blind), boolean, fillet, chamfer, transform, pattern, sheet and wire bodies |
 | `get_model` | bodies and faces (id, type, centre, outward normal, area) for picking faces |
 | `set_material`, `add_condition` | library or custom material; supports and loads on faces chosen by id or by filters (normal, box, type, area, nearest) |
-| `set_analysis`, `set_mesh`, `solve` | any gfem analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
+| `set_analysis`, `set_mesh`, `solve` | any EXFEM analysis; returns max deformation, max stress and its location, safety factor, reactions, frequencies, load factors, and a contour image |
 
 Every result goes back to the model, which checks it against your request and corrects itself.
 Other things the dialog does:
@@ -189,8 +191,8 @@ gfem ai "aluminium cantilever 200 x 20 x 10, fixed at x=0, 100 N down at the tip
 gfem ai --status
 ```
 
-The gfem tools can also be added to your own Claude Code or Codex sessions (then ask "build a ... with
-the gfem tools"):
+The EXFEM tools can also be added to your own Claude Code or Codex sessions (then ask "build a ... with
+the EXFEM tools"):
 
 ```bash
 gfem mcp --register claude
@@ -200,7 +202,7 @@ gfem mcp --register claude
 gfem mcp --register codex
 ```
 
-API keys are stored only on the computer that runs gfem (`~/.gfem/ai.json`, permissions 0600) and are
+API keys are stored only on the computer that runs EXFEM (`~/.gfem/ai.json`, permissions 0600) and are
 never sent to the browser. The GUI server refuses cross-origin requests, so another web page cannot
 use your account or credits.
 
@@ -363,7 +365,7 @@ Every CAD body, face, edge and vertex keeps its identity as a node/element set a
 
 ### Compared with typical open-source FE codes
 
-| | gfem | typical open-source FE |
+| | EXFEM | typical open-source FE |
 |---|---|---|
 | GPU | Everything (assembly, Newton, contact, explicit loop, topology optimisation) runs through JAX on GPU | CPU only, or GPU for the linear solver only |
 | New material | Write one stress (or energy) function; the consistent tangent comes from AD | Hand-derived tangent (UMAT) |
@@ -490,8 +492,8 @@ device direct solver, multi-GPU operator sharding, post-buckling, harmonic respo
 5. Element-kernel sharding across GPUs, cuDSS direct solver, HDF5 results
 6. Parasolid / CATIA / NX native files: these formats are proprietary and need licensed
    translators, which an open-source package cannot ship. Save as STEP (AP203/214/242) or IGES
-   from those systems; STEP keeps solids, sheets and wires, which gfem imports directly.
+   from those systems; STEP keeps solids, sheets and wires, which EXFEM imports directly.
 
 ## License
 
-Apache-2.0
+EXFEM is released under the [MIT License](LICENSE).

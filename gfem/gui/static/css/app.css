@@ -13,7 +13,7 @@ button { cursor: pointer; }
 /* title bar */
 #titlebar { display: flex; align-items: center; gap: 12px; padding: 0 10px; background: linear-gradient(#24476f, #1a3657); color: #fff; }
 .logo { font-size: 15px; letter-spacing: .3px; white-space: nowrap; }
-.logo b { font-weight: 600; } .logo-g { display: inline-block; width: 20px; height: 20px; border-radius: 4px; background: #f5a623; color: #1a3657; text-align: center; font-weight: 800; margin-right: 5px; line-height: 20px; }
+.logo b { font-weight: 600; } .logo-g { display: inline-block; min-width: 22px; padding: 0 3px; font-size: 11px; height: 20px; border-radius: 4px; background: #f5a623; color: #1a3657; text-align: center; font-weight: 800; margin-right: 5px; line-height: 20px; }
 .file-btns { display: flex; gap: 2px; }
 .file-btns > button, .dropdown > button { background: transparent; border: 1px solid transparent; color: #fff; padding: 3px 9px; border-radius: 3px; }
 .file-btns > button:hover, .dropdown > button:hover { background: rgba(255,255,255,.13); border-color: rgba(255,255,255,.25); }

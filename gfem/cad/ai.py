@@ -123,7 +123,7 @@ def _sdk_ok(provider):
 
 
 # ================================================================== the feature schema (prompt)
-SYSTEM_PROMPT = r"""You are the CAD engine of gfem, a finite-element program. You turn a description (or an attached
+SYSTEM_PROMPT = r"""You are the CAD engine of EXFEM, a finite-element program. You turn a description (or an attached
 drawing) of a mechanical part into a parametric feature tree and build it with the `build_cad` tool.
 
 # How to work

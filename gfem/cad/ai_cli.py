@@ -198,7 +198,7 @@ def _mcp_cmd(run_dir, units, base_file, visual, project=None):
 
 CLI_PROMPT = """{system}
 
-You are running inside gfem. Use ONLY the tools of the "gfem" MCP server: `cad_guide` (reference,
+You are running inside EXFEM. Use ONLY the tools of the "gfem" MCP server: `cad_guide` (reference,
 call it first), `current_model` (when modifying) and `build_cad` (build). Do not write files, edit code
 or run shell commands; the build_cad result (measurements + rendered views) is how you check your
 work. Finish with a short summary of the part."""
@@ -206,7 +206,7 @@ work. Finish with a short summary of the part."""
 
 CLI_SIM_PROMPT = """{system}
 
-You are running inside gfem as a simulation engineer. Use ONLY the tools of the "gfem" MCP server:
+You are running inside EXFEM as a simulation engineer. Use ONLY the tools of the "gfem" MCP server:
 `cad_guide` (read it first: geometry AND simulation reference), `get_model`, `build_cad`,
 `set_material`, `add_condition`, `remove_condition`, `set_analysis`, `set_mesh` and `solve`.
 Do not write files or run shell commands. Workflow: build or keep the geometry, get_model (face ids,

@@ -1018,7 +1018,7 @@ def serve(host="127.0.0.1", port=8765, workdir="gfem_work", open_browser=True):
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}/"
-    print(f"gfem GUI running at {url}  (workdir {session.workdir}); Ctrl+C to quit")
+    print(f"EXFEM GUI running at {url}  (workdir {session.workdir}); Ctrl+C to quit")
     if host not in ("127.0.0.1", "localhost", "::1"):
         try:
             from ..cad import ai as AI
