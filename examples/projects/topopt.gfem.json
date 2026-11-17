@@ -1,0 +1,146 @@
+{
+ "version": 2,
+ "name": "Topology optimisation (cantilever)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "box",
+    "name": "Design space",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 160,
+    "dy": 60,
+    "dz": 20
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     80.0,
+     30.0,
+     10.0
+    ],
+    "size": 192000.0
+   }
+  }
+ },
+ "mesh": {
+  "size": 5.0,
+  "order": 1,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "topopt",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.35,
+   "penal": 3.0,
+   "iters": 30,
+   "rmin": 9.0,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     1
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       30.0,
+       10.0
+      ],
+      "size": 1199.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   }
+  },
+  {
+   "id": "L1",
+   "type": "force",
+   "name": "Tip load",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     2
+    ],
+    "sigs": [
+     {
+      "com": [
+       160.0,
+       30.0,
+       10.0
+      ],
+      "size": 1199.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   },
+   "vector": [
+    0,
+    -5000.0,
+    0
+   ]
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "density",
+   "name": "Topology Density"
+  },
+  {
+   "id": "R2",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  }
+ ]
+}

@@ -1,0 +1,248 @@
+{
+ "version": 2,
+ "name": "Plate with hole (Kt)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "box",
+    "name": "Plate",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 200,
+    "dy": 100,
+    "dz": 10
+   },
+   {
+    "id": "F2",
+    "type": "cylinder",
+    "name": "Hole",
+    "x": 100,
+    "y": 50,
+    "z": -1,
+    "dx": 0,
+    "dy": 0,
+    "dz": 12,
+    "r": 20
+   },
+   {
+    "id": "F3",
+    "type": "boolean",
+    "name": "Cut",
+    "op": "cut",
+    "target": [
+     "F1"
+    ],
+    "tool": [
+     "F2"
+    ]
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     100.0,
+     50.0,
+     4.999999999999999
+    ],
+    "size": 187433.62938564082
+   }
+  }
+ },
+ "mesh": {
+  "size": 5.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": [
+   {
+    "id": "S1",
+    "name": "Hole sizing",
+    "scope": {
+     "dim": 2,
+     "ids": [
+      7
+     ],
+     "sigs": [
+      {
+       "com": [
+        100.0,
+        50.0,
+        5.0
+       ],
+       "size": 1256.6370614359173,
+       "type": "Cylinder"
+      }
+     ]
+    },
+    "size": 1.5
+   }
+  ]
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "static",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "frictionless",
+   "name": "Symmetry X",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     1
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       50.0,
+       5.0
+      ],
+      "size": 999.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   }
+  },
+  {
+   "id": "B2",
+   "type": "displacement",
+   "name": "Rigid body",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     2
+    ],
+    "sigs": [
+     {
+      "com": [
+       100.0,
+       0.0,
+       5.0
+      ],
+      "size": 1999.9999999999995,
+      "type": "Plane"
+     }
+    ]
+   },
+   "components": [
+    null,
+    0.0,
+    null
+   ]
+  },
+  {
+   "id": "B3",
+   "type": "displacement",
+   "name": "Z fix",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     5
+    ],
+    "sigs": [
+     {
+      "com": [
+       100.0,
+       50.0,
+       0.0
+      ],
+      "size": 18743.36293856408,
+      "type": "Plane"
+     }
+    ]
+   },
+   "components": [
+    null,
+    null,
+    0.0
+   ]
+  },
+  {
+   "id": "L1",
+   "type": "pressure",
+   "name": "Tension 100 MPa",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     6
+    ],
+    "sigs": [
+     {
+      "com": [
+       200.0,
+       50.0,
+       5.0
+      ],
+      "size": 999.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   },
+   "value": -100.0
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  },
+  {
+   "id": "R3",
+   "type": "stress_xx",
+   "name": "Normal Stress X"
+  }
+ ]
+}

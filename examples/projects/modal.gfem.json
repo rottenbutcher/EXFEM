@@ -1,0 +1,119 @@
+{
+ "version": 2,
+ "name": "Cantilever modal",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "box",
+    "name": "Beam",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 300,
+    "dy": 20,
+    "dz": 10
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Aluminum Alloy",
+   "model": "linear",
+   "color": "#c4cbd4",
+   "E": 71000.0,
+   "nu": 0.33,
+   "density": 2.7699999999999997e-09,
+   "alpha": 2.3e-05,
+   "k": 144.0,
+   "cp": 875000000.0,
+   "yield": 280.0,
+   "tangent": 500.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     149.99999999999997,
+     9.999999999999998,
+     5.0
+    ],
+    "size": 60000.0
+   }
+  }
+ },
+ "mesh": {
+  "size": 5.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "modal",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     1
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       10.0,
+       5.0
+      ],
+      "size": 199.99999999999997,
+      "type": "Plane"
+     }
+    ]
+   }
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  }
+ ]
+}

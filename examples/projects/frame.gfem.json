@@ -1,0 +1,357 @@
+{
+ "version": 2,
+ "name": "3D steel frame (beams)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "line",
+    "name": "Columns + beams",
+    "points": [
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      3000.0
+     ],
+     [
+      4000.0,
+      0.0,
+      3000.0
+     ],
+     [
+      4000.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   {
+    "id": "F2",
+    "type": "line",
+    "name": "Frame 2",
+    "points": [
+     [
+      0.0,
+      3000.0,
+      0.0
+     ],
+     [
+      0.0,
+      3000.0,
+      3000.0
+     ],
+     [
+      4000.0,
+      3000.0,
+      3000.0
+     ],
+     [
+      4000.0,
+      3000.0,
+      0.0
+     ]
+    ]
+   },
+   {
+    "id": "F3",
+    "type": "line",
+    "name": "Tie 1",
+    "points": [
+     [
+      0.0,
+      0.0,
+      3000.0
+     ],
+     [
+      0.0,
+      3000.0,
+      3000.0
+     ]
+    ]
+   },
+   {
+    "id": "F4",
+    "type": "line",
+    "name": "Tie 2",
+    "points": [
+     [
+      4000.0,
+      0.0,
+      3000.0
+     ],
+     [
+      4000.0,
+      3000.0,
+      3000.0
+     ]
+    ]
+   }
+  ],
+  "share_topology": true
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "L1": {
+   "name": "Member 1",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     0.0,
+     0.0,
+     1500.0
+    ],
+    "size": 3000.0
+   }
+  },
+  "L2": {
+   "name": "Member 2",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     2000.0,
+     0.0,
+     3000.0
+    ],
+    "size": 4000.0
+   }
+  },
+  "L3": {
+   "name": "Member 3",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     4000.0,
+     0.0,
+     1500.0
+    ],
+    "size": 3000.0
+   }
+  },
+  "L4": {
+   "name": "Member 4",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     0.0,
+     3000.0,
+     1500.0
+    ],
+    "size": 3000.0
+   }
+  },
+  "L5": {
+   "name": "Member 5",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     2000.0,
+     3000.0,
+     3000.0
+    ],
+    "size": 4000.0
+   }
+  },
+  "L6": {
+   "name": "Member 6",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     4000.0,
+     3000.0,
+     1500.0
+    ],
+    "size": 3000.0
+   }
+  },
+  "L7": {
+   "name": "Member 7",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     0.0,
+     1500.0,
+     3000.0
+    ],
+    "size": 3000.0
+   }
+  },
+  "L8": {
+   "name": "Member 8",
+   "material": "M1",
+   "profile": "I",
+   "dims": [
+    300.0,
+    150.0,
+    10.0,
+    7.0
+   ],
+   "sig": {
+    "com": [
+     4000.0,
+     1500.0,
+     3000.0
+    ],
+    "size": 3000.0
+   }
+  }
+ },
+ "mesh": {
+  "size": 250.0,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [],
+ "named_selections": [],
+ "analysis": {
+  "type": "modal",
+  "nlgeom": false,
+  "substeps": 1,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Column bases",
+   "scope": {
+    "dim": 0,
+    "ids": [
+     1,
+     4,
+     5,
+     8
+    ],
+    "sigs": [
+     {
+      "com": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "size": 0.0
+     },
+     {
+      "com": [
+       4000.0,
+       0.0,
+       0.0
+      ],
+      "size": 0.0
+     },
+     {
+      "com": [
+       0.0,
+       3000.0,
+       0.0
+      ],
+      "size": 0.0
+     },
+     {
+      "com": [
+       4000.0,
+       3000.0,
+       0.0
+      ],
+      "size": 0.0
+     }
+    ]
+   }
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Mode shape"
+  }
+ ]
+}

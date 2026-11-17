@@ -1,0 +1,211 @@
+{
+ "version": 2,
+ "name": "Punch contact (nonlinear)",
+ "units": "mm",
+ "geometry": {
+  "features": [
+   {
+    "id": "F1",
+    "type": "box",
+    "name": "Base block",
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "dx": 40,
+    "dy": 40,
+    "dz": 20
+   },
+   {
+    "id": "F2",
+    "type": "cylinder",
+    "name": "Punch",
+    "x": 20,
+    "y": 20,
+    "z": 20.0,
+    "dx": 0,
+    "dy": 0,
+    "dz": 20,
+    "r": 10
+   }
+  ],
+  "share_topology": false
+ },
+ "mesh_source": null,
+ "materials": [
+  {
+   "name": "Structural Steel",
+   "model": "linear",
+   "color": "#8aa9c9",
+   "E": 200000.0,
+   "nu": 0.3,
+   "density": 7.849999999999999e-09,
+   "alpha": 1.2e-05,
+   "k": 60.5,
+   "cp": 434000000.0,
+   "yield": 250.0,
+   "tangent": 1450.0,
+   "tref": 22.0,
+   "id": "M1"
+  }
+ ],
+ "bodies": {
+  "1": {
+   "name": "Body 1",
+   "material": "M1",
+   "sig": {
+    "com": [
+     20.0,
+     20.0,
+     10.0
+    ],
+    "size": 31999.999999999993
+   }
+  },
+  "2": {
+   "name": "Body 2",
+   "material": "M1",
+   "sig": {
+    "com": [
+     20.0,
+     20.0,
+     30.000000000000004
+    ],
+    "size": 6283.185307179586
+   }
+  }
+ },
+ "mesh": {
+  "size": 2.5,
+  "order": 2,
+  "kind": "tet",
+  "curvature": 12,
+  "local": []
+ },
+ "connections": [
+  {
+   "id": "C1",
+   "type": "frictionless",
+   "name": "Frictionless - Punch/Base",
+   "master": {
+    "dim": 2,
+    "ids": [
+     6
+    ],
+    "sigs": [
+     {
+      "com": [
+       20.0,
+       20.0,
+       20.0
+      ],
+      "size": 1599.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   },
+   "slave": {
+    "dim": 2,
+    "ids": [
+     9
+    ],
+    "sigs": [
+     {
+      "com": [
+       20.0,
+       20.0,
+       20.0
+      ],
+      "size": 314.1592653589793,
+      "type": "Plane"
+     }
+    ]
+   },
+   "fkn": 1.0
+  }
+ ],
+ "named_selections": [],
+ "analysis": {
+  "type": "static",
+  "nlgeom": true,
+  "substeps": 4,
+  "max_substeps": 200,
+  "time": 1.0,
+  "nmodes": 6,
+  "linear_solver": "auto",
+  "frames": 20,
+  "damping": 0.0,
+  "dt": null,
+  "topopt": {
+   "volfrac": 0.4,
+   "penal": 3.0,
+   "iters": 40,
+   "rmin": null,
+   "keep_bc": true
+  },
+  "transient": false,
+  "initial_temperature": 22.0
+ },
+ "conditions": [
+  {
+   "id": "B1",
+   "type": "fixed",
+   "name": "Fixed Support",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     5
+    ],
+    "sigs": [
+     {
+      "com": [
+       20.0,
+       20.0,
+       0.0
+      ],
+      "size": 1599.9999999999998,
+      "type": "Plane"
+     }
+    ]
+   }
+  },
+  {
+   "id": "B2",
+   "type": "displacement",
+   "name": "Press 0.05 mm",
+   "scope": {
+    "dim": 2,
+    "ids": [
+     8
+    ],
+    "sigs": [
+     {
+      "com": [
+       20.0,
+       20.0,
+       40.0
+      ],
+      "size": 314.1592653589793,
+      "type": "Plane"
+     }
+    ]
+   },
+   "components": [
+    0.0,
+    0.0,
+    -0.05
+   ]
+  }
+ ],
+ "results": [
+  {
+   "id": "R1",
+   "type": "total_deformation",
+   "name": "Total Deformation"
+  },
+  {
+   "id": "R2",
+   "type": "von_mises",
+   "name": "Equivalent Stress"
+  }
+ ]
+}
